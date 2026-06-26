@@ -96,20 +96,53 @@ def combine_transcript_text(items: list[dict[str, Any]]) -> str:
 
 
 def transcript_has_qna(transcript_item: dict[str, Any]) -> bool:
-    return bool(QA_MARKERS.search(extract_transcript_text(transcript_item)))
+    text = extract_transcript_text(transcript_item)
+    return bool(QA_START_MARKERS.search(text))
 
 
 def split_transcript_sections(full_text: str) -> dict[str, Any]:
-    """Heuristically split a transcript into prepared remarks and Q&A."""
-    match = QA_START_MARKERS.search(full_text)
+    """Split a transcript into prepared remarks and Q&A.
+
+    Introductory phrases like "a question-and-answer session will follow"
+    are not treated as the real Q&A start.
+    """
     if not full_text:
-        return {"prepared_remarks": "", "qna": "", "qna_start_offset": None}
+        return {
+            "prepared_remarks": "",
+            "qna": "",
+            "qna_start_offset": None,
+            "section_detection_warning": None,
+        }
+
+    match = QA_START_MARKERS.search(full_text)
+
     if not match:
-        return {"prepared_remarks": full_text, "qna": "", "qna_start_offset": None}
+        warning = (
+            "qna_mentioned_but_no_reliable_qna_start"
+            if QA_MENTION_MARKERS.search(full_text)
+            else None
+        )
+        return {
+            "prepared_remarks": full_text,
+            "qna": "",
+            "qna_start_offset": None,
+            "section_detection_warning": warning,
+        }
+
+    nearby = full_text[max(0, match.start() - 80): match.end() + 120]
+    if FALSE_QA_INTRO_MARKERS.search(nearby):
+        return {
+            "prepared_remarks": full_text,
+            "qna": "",
+            "qna_start_offset": None,
+            "section_detection_warning": "qna_start_likely_false_positive",
+        }
+
     return {
         "prepared_remarks": full_text[: match.start()].strip(),
         "qna": full_text[match.start() :].strip(),
         "qna_start_offset": match.start(),
+        "section_detection_warning": None,
     }
 
 
@@ -152,6 +185,8 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
     operator_qna_start_detected = bool(QA_START_MARKERS.search(qna)) if qna else False
     operator_close_detected = bool(CLOSING_MARKERS.search(full_text))
     explicit_truncation_marker_detected = bool(TRUNCATION_MARKERS.search(full_text))
+    section_detection_warning = sections.get("section_detection_warning")
+    qna_mention_detected = bool(QA_MENTION_MARKERS.search(full_text))
     prepared_remarks_available = bool(prepared.strip())
 
     # Heuristic counts. They are not perfect, but they are explicit and auditable.
@@ -163,8 +198,12 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
         truncation_reasons.append("empty_transcript_payload")
     if has_text and word_count < MIN_FULL_CALL_WORDS:
         truncation_reasons.append("too_short_for_typical_full_earnings_call")
-    if has_text and not qna_detected:
+    if has_text and not qna_detected and qna_mention_detected:
+        truncation_reasons.append("qna_mentioned_but_reliable_qna_start_not_detected")
+    elif has_text and not qna_detected:
         truncation_reasons.append("qna_start_not_detected")
+    if section_detection_warning:
+        truncation_reasons.append(section_detection_warning)
     if qna_detected and qna_word_count < 250:
         truncation_reasons.append("qna_detected_but_too_short")
     if has_text and not operator_close_detected:
@@ -191,8 +230,8 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
         "operator_qna_start_detected": operator_qna_start_detected,
         "operator_close_detected": operator_close_detected,
         "explicit_truncation_marker_detected": explicit_truncation_marker_detected,
-        "section_detection_warning": sections.get("section_detection_warning"),
-        "qna_mention_detected": bool(QA_MENTION_MARKERS.search(full_text)),
+        "section_detection_warning": section_detection_warning,
+        "qna_mention_detected": qna_mention_detected,
         "likely_truncated_or_incomplete": not likely_complete,
         "truncation_reasons": truncation_reasons,
         "qna_validation": {
@@ -314,9 +353,21 @@ def build_transcript_payload(
     returned_complete = bool(include_full_text and not content_truncated_by_tool and selected_text)
     qna_included = section in {"full", "qna"} and bool(sections["qna"]) and not (section == "full" and content_truncated_by_tool and len(returned_text) < (sections["qna_start_offset"] or 10**12))
 
-    status = "complete" if source_complete and returned_complete else "incomplete"
     if not transcript_available:
         status = "missing"
+        status_detail = "missing"
+    elif content_truncated_by_tool:
+        status = "incomplete"
+        status_detail = "tool_truncated"
+    elif not source_complete:
+        status = "incomplete"
+        status_detail = "source_incomplete"
+    elif not returned_complete:
+        status = "incomplete"
+        status_detail = "not_fully_returned_in_payload"
+    else:
+        status = "complete"
+        status_detail = "complete"
 
     record = {
         "symbol": symbol.upper(),
@@ -343,6 +394,7 @@ def build_transcript_payload(
         "prepared_remarks_complete": completeness["prepared_remarks_complete"],
         "operator_qna_start_detected": completeness["operator_qna_start_detected"],
         "operator_close_detected": completeness["operator_close_detected"],
+        "section_detection_warning": completeness.get("section_detection_warning"),
         "completeness": completeness,
         "sections_metadata": {
             "prepared_remarks_character_count": len(sections["prepared_remarks"]),
