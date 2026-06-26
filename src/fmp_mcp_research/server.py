@@ -87,7 +87,10 @@ async def fmp_get_earnings_call_transcript(
     """
 
     data = await FMPClient().transcript(symbol=symbol, year=year, quarter=quarter)
-    payload = pack_transcript_response(
+    payload = build_transcript_payload(
+        symbol=symbol,
+        year=year,
+        quarter=quarter,
         raw=data,
         section="full",
         include_full_text=True,
