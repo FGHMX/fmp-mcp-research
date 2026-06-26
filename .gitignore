@@ -1,8 +1,8 @@
 .env
-.venv
+.venv/
 __pycache__/
 .pytest_cache/
-*.pyc
-
+.ruff_cache/
+.mypy_cache/
+dist/
 *.egg-info/
-.pytest_cache/

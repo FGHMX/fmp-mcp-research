@@ -1,91 +1,46 @@
 # FMP MCP Research Server
 
-Remote MCP server for ChatGPT or another LLM that exposes read-only FMP tools for strict buy-side earnings-call research reports.
+Remote MCP server for ChatGPT or another LLM that exposes read-only Financial Modeling Prep tools for professional buy-side earnings-call research workflows.
 
-The server is designed for workflows where the LLM must select recent earnings calls, read full prepared remarks and Q&A, review official releases/filings and financial tables, complete a source audit, and only then produce catalyst scoring. The MCP does **not** generate final investment recommendations.
+The server does **not** generate final investment recommendations. It builds evidence manifests, returns transcript completeness metadata, finds filings/tables, and helps an analyst or LLM decide whether a scorecard is supported by the evidence.
 
-## What changed in this version
+## Version 0.3.0 changes
 
-This version improves the MCP/LLM contract for strict research-report workflows:
-
-- `fmp_build_research_evidence_pack` is now explicitly an **orchestrator / evidence manifest**, not proof that transcripts were fully read.
-- `fmp_get_earnings_call_transcript` is the **canonical full-transcript tool**.
-- Transcript outputs now include mechanical completeness metadata:
-  - `full_transcript_complete`
-  - `qna_available`
-  - `qna_complete`
-  - `content_truncated_by_tool`
-  - `returned_character_count`
-  - `total_character_count`
-  - `operator_qna_start_detected`
-  - `operator_close_detected`
-- The evidence pack separates:
-  - source exists
-  - source available
-  - source included in payload
-  - source complete in payload
-  - agent still needs to read it
-- The evidence pack returns `scoring_readiness`, `blocking_items`, and `recommended_next_actions` so the LLM knows exactly which tool to call next.
-- SEC filings are prioritized for report work: 8-K/6-K earnings releases, 10-Q, 10-K, then all filings.
-- Financial tables no longer silently substitute unrelated latest rows in strict mode.
-- Added `fmp_validate_research_evidence` for mechanical readiness checks on an evidence-pack payload.
-- Added Healthcare Technology sector diagnostics to the report contract.
+- Aligned the transcript tool contract with the documented workflow: `section` and `max_chars` are now supported.
+- Fixed truncation-marker detection so normal transcripts are not falsely marked as truncated.
+- Added a softer `transcript_quality_status`: `complete`, `usable_with_warnings`, or `incomplete`.
+- Kept Q&A split uncertainty as a warning rather than an automatic hard block.
+- Added `contract_version` and `evidence_pack_version`.
+- Added dev dependencies for pytest, ruff, mypy and respx.
+- Added CI skeleton for test/lint.
+- Reformatted the project into maintainable Python modules.
+- Hardened Docker by running as a non-root user.
 
 ## Tools exposed
 
 | Tool | Purpose |
 |---|---|
-| `fmp_get_company_profile` | Get subsector, company description, market data, sector/industry context. |
-| `fmp_list_transcript_dates` | Discover available transcript periods and recommend the canonical transcript fetch tool. |
-| `fmp_get_earnings_call_transcript` | Canonical fetch for full transcript text, prepared remarks/Q&A metadata, completeness and truncation status. |
+| `fmp_get_company_profile` | Get sector, industry, market cap and descriptive metadata. |
+| `fmp_list_transcript_dates` | Discover available earnings-call transcript periods. |
+| `fmp_get_earnings_call_transcript` | Fetch full transcript, prepared remarks, Q&A, or metadata. |
 | `fmp_get_statement_tables` | Fetch income statement, balance sheet, cash flow, key metrics, ratios and growth. |
-| `fmp_search_sec_filings` | Find and prioritize official filings, especially 8-K/6-K earnings releases and 10-Q/10-K evidence. |
+| `fmp_search_sec_filings` | Find and prioritize 8-K/6-K earnings releases plus 10-Q/10-K evidence. |
 | `fmp_get_earnings_calendar` | Confirm earnings dates and EPS actual/estimate context. |
-| `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, source status, financial tables, filings, audit templates and next actions. |
-| `fmp_validate_research_evidence` | Mechanically validate an evidence-pack payload and return blocking items / next actions. |
-| `research_report_contract` | Return required report sections, scoring fields, source-audit fields and sector overlay diagnostics. |
+| `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, audit template and next actions. |
+| `fmp_validate_research_evidence` | Mechanically validate an evidence-pack payload. |
+| `research_report_contract` | Return report sections, audit fields and score dimensions. |
 
-## Recommended strict report workflow
+## Recommended workflow
 
 1. Call `research_report_contract(sector="healthcare_technology")` or the relevant sector.
-2. For each ticker, call `fmp_build_research_evidence_pack(symbol="PSNL", min_year=2025, requested_calls=2, strict_report_workflow=true)`.
-3. Read `selected_periods`, `evidence_manifest`, `scoring_readiness.blocking_items`, and `recommended_next_actions`.
+2. Call `fmp_build_research_evidence_pack(symbol="PSNL", min_year=2025, requested_calls=2)`.
+3. Read `selected_periods`, `evidence_manifest`, `scoring_readiness` and `recommended_next_actions`.
 4. For every selected period, call `fmp_get_earnings_call_transcript(symbol, year, quarter, section="full")`.
-5. If `content_truncated_by_tool=true`, call the same tool with `section="prepared_remarks"` and `section="qna"`, or increase `max_chars`.
-6. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after the LLM actually reads the returned prepared remarks and Q&A.
-7. Use `fmp_search_sec_filings` to locate official 8-K/6-K earnings releases and 10-Q/10-K filings.
-8. Use `fmp_get_statement_tables` for financial tables; verify period matching.
-9. Complete the source audit and quarter-by-quarter coverage audit.
-10. Only then generate the scorecard and adjusted score.
-
-## Important MCP/LLM contract
-
-`fmp_build_research_evidence_pack` should not be treated as authorization to score. It may omit transcript text by default or return an excerpt if a transcript is very long. This is intentional to avoid ambiguous partial evidence.
-
-For strict scoring reports:
-
-- The evidence pack identifies what exists and what must be fetched.
-- The dedicated transcript tool returns canonical transcript text and completeness metadata.
-- The LLM must confirm actual reading in its own audit.
-- If a required source is missing, truncated, unavailable, or not read, scoring must be blocked or capped according to the report prompt.
-
-## FMP endpoints used
-
-Base URL: `https://financialmodelingprep.com/stable`
-
-- `/profile?symbol=...`
-- `/earning-call-transcript-dates?symbol=...`
-- `/earning-call-transcript?symbol=...&year=...&quarter=...`
-- `/earning-call-transcript-latest`
-- `/earnings-calendar?symbol=...&from=...&to=...`
-- `/income-statement?symbol=...&period=quarter&limit=...`
-- `/balance-sheet-statement?symbol=...&period=quarter&limit=...`
-- `/cash-flow-statement?symbol=...&period=quarter&limit=...`
-- `/key-metrics?symbol=...&period=quarter&limit=...`
-- `/ratios?symbol=...&period=quarter&limit=...`
-- `/financial-growth?symbol=...&period=quarter&limit=...`
-- `/sec-filings-search/symbol?symbol=...&from=...&to=...`
-- `/sec-filings-8k?from=...&to=...`
+5. If `content_truncated_by_tool=true`, fetch `section="prepared_remarks"` and `section="qna"` separately.
+6. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after actually reading the returned text.
+7. Use `fmp_search_sec_filings` to locate official 8-K/6-K releases and 10-Q/10-K filings.
+8. Use `fmp_get_statement_tables` for financial tables and verify period matching.
+9. Complete the source audit before producing a scorecard.
 
 ## Local development
 
@@ -94,7 +49,8 @@ cp .env.example .env
 # edit .env and set FMP_API_KEY
 python -m venv .venv
 source .venv/bin/activate
-pip install -e .
+pip install -e ".[dev]"
+pytest
 python -m fmp_mcp_research.server
 ```
 
@@ -112,26 +68,10 @@ cp .env.example .env
 docker compose up --build
 ```
 
-## Deployment recommendation
-
-For ChatGPT, deploy as a remote HTTPS MCP server. Local is best only for development. For production, use Cloud Run, Fly.io, ECS/Fargate or another container runtime with HTTPS.
-
-Recommended default: **Google Cloud Run**
-
-```bash
-gcloud run deploy fmp-mcp-research \
-  --source . \
-  --region us-central1 \
-  --allow-unauthenticated \
-  --set-env-vars FMP_API_KEY=YOUR_KEY
-```
-
-For a production workspace, replace `--allow-unauthenticated` with an OAuth/API-gateway layer or Cloud Run IAM where supported by your MCP client path.
-
 ## Security guardrails
 
 - Keep `FMP_API_KEY` server-side only.
 - Do not expose write tools.
 - Do not add a tool that generates final investment recommendations.
-- Log tool name, symbol, quarter and source coverage status; do not log full API keys or secrets.
-- Add rate limiting if used by multiple analysts.
+- Log tool name, symbol, quarter and source coverage status; do not log API keys.
+- Add rate limiting and an auth layer if used by multiple analysts or exposed outside a trusted network.

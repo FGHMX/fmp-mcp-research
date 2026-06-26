@@ -1,86 +1,93 @@
+from __future__ import annotations
+
+CONTRACT_VERSION = "0.3.0"
+
 REPORT_OUTPUT_SECTIONS = [
-    "Executive summary",
-    "Source audit and quarter-by-quarter coverage audit",
-    "Comparability assessment",
-    "Financial baseline + Financial Reality",
-    "Reporting credibility check",
-    "Earnings call roadmap",
-    "Financial Alignment",
-    "Catalysts / anti-catalysts",
-    "Recurring Market Concerns / Next Call Risk Monitor",
-    "Scorecard",
-    "Final comparative table",
-    "Prioritization table sorted by Adjusted Score",
+    "company_snapshot",
+    "selected_periods",
+    "source_coverage_audit",
+    "earnings_call_summary_by_period",
+    "financial_tables_review",
+    "official_filings_review",
+    "catalyst_scorecard",
+    "blocking_items_and_limitations",
 ]
 
 REQUIRED_SOURCE_FLAGS = [
-    "designated_mcp_transcript_used",
-    "designated_mcp_qna_used",
-    "mcp_retry_1_attempted",
-    "mcp_retry_2_attempted",
-    "internet_full_transcript_fallback_used",
-    "transcript_source_name",
-    "qna_source_name",
-    "official_earnings_release_used",
-    "official_quarter_financial_tables_used",
-    "eight_k_or_six_k_used",
-    "ir_or_edgar_fallback_used",
-    "confidence_impact_from_missing_sources",
+    "transcript_period_selected",
+    "full_call_text_returned",
+    "full_call_text_read",
+    "prepared_remarks_reviewed",
+    "qna_available",
+    "qna_reviewed",
+    "official_release_candidate_found",
+    "official_release_reviewed",
+    "financial_tables_matched_to_period",
+    "scorecard_allowed",
 ]
 
 CORE_SCORE_DIMENSIONS = [
-    "materiality",
-    "probability_of_occurrence",
-    "verifiability",
-    "novelty",
-    "controllability",
-    "strength_of_signal_in_qna",
+    "revenue_growth_quality",
+    "margin_and_cash_flow_progression",
+    "guidance_revision_or_reiteration",
+    "pipeline_or_product_momentum",
+    "management_tone_and_execution",
+    "balance_sheet_and_liquidity",
 ]
 
 SECONDARY_SCORE_DIMENSIONS = [
-    "management_communication_posture",
-    "surprise_vs_market_expectations",
-    "narrative_consistency",
-    "timing_clarity",
-    "magnitude_of_quantitative_support",
-    "dependence_on_external_assumptions",
+    "analyst_qna_concerns",
+    "competitive_positioning",
+    "regulatory_or_reimbursement_risk",
+    "customer_adoption_or_retention",
+    "near_term_catalyst_density",
 ]
 
 PHARMA_LENSES = [
-    "treated_patient_demand_quality",
-    "access_net_revenue_quality",
-    "competitive_lifecycle_durability",
-    "pipeline_label_expansion_quality",
-    "portfolio_cash_conversion_quality",
+    "clinical_trial_progress",
+    "regulatory_timeline_clarity",
+    "commercial_launch_quality",
+    "cash_runway_and_financing_risk",
 ]
 
 HEALTHCARE_TECH_LENSES = [
-    "monetization_quality",
-    "healthcare_workflow_embeddedness",
-    "stakeholder_economics_revenue_durability",
-    "data_automation_product_defensibility",
-    "margin_cac_cash_conversion_quality",
+    "implementation_velocity",
+    "client_retention_and_expansion",
+    "gross_margin_scalability",
+    "ai_or_platform_differentiation",
 ]
 
-EVIDENCE_READINESS_STATES = [
-    "source_not_found",
-    "source_available_not_returned",
-    "source_returned_partial_or_truncated",
-    "source_returned_complete_agent_must_read",
-    "agent_review_confirmed_outside_mcp",
-]
 
-TRANSCRIPT_COMPLETENESS_FIELDS = [
-    "call_exists",
-    "transcript_available",
-    "full_transcript_included_in_payload",
-    "included_content_is_excerpt",
-    "content_truncated_by_tool",
-    "qna_detected_in_source",
-    "qna_included_in_payload",
-    "qna_complete",
-    "operator_qna_start_detected",
-    "operator_close_detected",
-    "must_call_dedicated_transcript_tool",
-    "score_allowed_from_current_payload",
-]
+def build_report_contract(sector: str = "healthcare_technology") -> dict[str, object]:
+    if sector == "pharma":
+        overlay_name = "pharma"
+        lenses = PHARMA_LENSES
+    elif sector == "healthcare_technology":
+        overlay_name = "healthcare_technology"
+        lenses = HEALTHCARE_TECH_LENSES
+    else:
+        overlay_name = "none"
+        lenses = []
+
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "strictness": "professional_not_overly_strict",
+        "required_sections": REPORT_OUTPUT_SECTIONS,
+        "required_source_audit_fields": REQUIRED_SOURCE_FLAGS,
+        "core_score_dimensions": CORE_SCORE_DIMENSIONS,
+        "secondary_score_dimensions": SECONDARY_SCORE_DIMENSIONS,
+        "sector_overlay": overlay_name,
+        "sector_lens_scores_diagnostic_only": lenses,
+        "workflow_contract": {
+            "evidence_pack_is_orchestrator_not_final_review": True,
+            "canonical_transcript_fetch_tool": "fmp_get_earnings_call_transcript",
+            "must_fetch_transcript_for_each_selected_period": True,
+            "must_read_prepared_remarks_and_qna_before_scoring": True,
+            "must_review_official_release_and_financial_tables_separately": True,
+            "qna_split_uncertain_is_warning_not_automatic_blocker": True,
+        },
+        "scoring_guardrail": (
+            "Do not produce a scorecard until the coverage audit confirms the required "
+            "sources have been returned and reviewed. If evidence is partial, disclose the limitation."
+        ),
+    }
