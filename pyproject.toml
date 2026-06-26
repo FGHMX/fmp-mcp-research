@@ -1,0 +1,20 @@
+[project]
+name = "fmp-mcp-research"
+version = "0.1.0"
+description = "Remote MCP server for FMP-backed buy-side earnings-call research evidence packs."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "mcp[cli]>=1.18.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.7.0",
+  "python-dotenv>=1.0.1",
+  "tenacity>=8.2.3",
+  "uvicorn>=0.30.0"
+]
+
+[project.scripts]
+fmp-mcp-research = "fmp_mcp_research.server:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
