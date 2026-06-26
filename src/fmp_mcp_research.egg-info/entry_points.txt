@@ -1,2 +1,0 @@
-[console_scripts]
-fmp-mcp-research = fmp_mcp_research.server:main
