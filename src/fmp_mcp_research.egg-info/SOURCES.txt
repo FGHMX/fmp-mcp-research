@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+src/fmp_mcp_research/evidence.py
+src/fmp_mcp_research/fmp_client.py
+src/fmp_mcp_research/report_contract.py
+src/fmp_mcp_research/server.py
+src/fmp_mcp_research.egg-info/PKG-INFO
+src/fmp_mcp_research.egg-info/SOURCES.txt
+src/fmp_mcp_research.egg-info/dependency_links.txt
+src/fmp_mcp_research.egg-info/entry_points.txt
+src/fmp_mcp_research.egg-info/requires.txt
+src/fmp_mcp_research.egg-info/top_level.txt
+tests/test_contract.py

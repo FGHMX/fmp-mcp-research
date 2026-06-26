@@ -6,10 +6,19 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
-from .evidence import build_evidence_pack, normalize_transcript_dates
+from .evidence import (
+    TranscriptSection,
+    assess_transcript_completeness,
+    build_evidence_pack,
+    build_transcript_payload,
+    normalize_transcript_dates,
+    prioritize_sec_filings,
+    validate_evidence_payload,
+)
 from .fmp_client import FMPClient
 from .report_contract import (
     CORE_SCORE_DIMENSIONS,
+    HEALTHCARE_TECH_LENSES,
     PHARMA_LENSES,
     REPORT_OUTPUT_SECTIONS,
     REQUIRED_SOURCE_FLAGS,
@@ -35,27 +44,63 @@ async def fmp_get_company_profile(symbol: str) -> dict[str, Any]:
 
 @mcp.tool()
 async def fmp_list_transcript_dates(symbol: str, min_year: int = 2025, limit: int = 2) -> dict[str, Any]:
-    """List available FMP earnings-call transcript dates and select the most recent calls at or after min_year."""
+    """List available FMP earnings-call transcript periods and recommend the canonical full transcript fetch tool."""
     raw = await FMPClient().transcript_dates(symbol)
+    selected = normalize_transcript_dates(raw, min_year=min_year, max_items=limit)
     return {
         "symbol": symbol.upper(),
-        "selected_periods": normalize_transcript_dates(raw, min_year=min_year, max_items=limit),
+        "min_year": min_year,
+        "requested_calls": limit,
+        "available_calls": selected,
+        "selected_periods": selected,
+        "recommended_next_action": (
+            {
+                "tool": "fmp_get_earnings_call_transcript",
+                "arguments_template": {"symbol": symbol.upper(), "year": "<year>", "quarter": "<quarter>", "section": "full"},
+                "reason": "Fetch each selected period with the canonical transcript tool before scoring.",
+            }
+            if selected
+            else {
+                "tool": "fmp_list_transcript_dates",
+                "arguments": {"symbol": symbol.upper(), "min_year": min_year - 1, "limit": limit},
+                "reason": "No transcript periods found at or after min_year. Widen the year filter before concluding no EC is available.",
+            }
+        ),
         "raw": raw,
     }
 
 
 @mcp.tool()
-async def fmp_get_earnings_call_transcript(symbol: str, year: int, quarter: int) -> dict[str, Any]:
-    """Fetch the full FMP earnings-call transcript for a symbol/year/quarter. Agent must read prepared remarks and Q&A before scoring."""
+async def fmp_get_earnings_call_transcript(
+    symbol: str,
+    year: int,
+    quarter: int,
+    section: TranscriptSection = "full",
+    include_text: bool = True,
+    max_chars: int = 120000,
+) -> dict[str, Any]:
+    """Canonical fetch for one earnings-call transcript with completeness/Q&A/truncation metadata.
+
+    Use this tool for every selected period before a strict research report scorecard. It separates source availability,
+    payload completeness, Q&A detection, and tool-side truncation so the LLM does not confuse a partial payload with a
+    missing source.
+    """
     data = await FMPClient().transcript(symbol, year, quarter)
-    return {
-        "symbol": symbol.upper(),
-        "year": year,
-        "quarter": quarter,
-        "source_name": "FMP earning-call-transcript",
-        "data": data,
-        "audit_note": "If Q&A text is absent or incomplete, run this tool twice more, then use an internet full-transcript fallback before scoring.",
-    }
+    payload = build_transcript_payload(
+        symbol=symbol,
+        year=year,
+        quarter=quarter,
+        raw=data,
+        section=section,
+        include_full_text=include_text,
+        max_chars=max_chars,
+    )
+    payload["raw_data"] = data if include_text and not payload["content_truncated_by_tool"] else None
+    payload["audit_note"] = (
+        "Mark full_call_text_read and qna_reviewed yes only after the agent actually reads returned prepared remarks and Q&A. "
+        "If content_truncated_by_tool is true, call again with section='prepared_remarks' and section='qna', or increase max_chars."
+    )
+    return payload
 
 
 @mcp.tool()
@@ -75,7 +120,7 @@ async def fmp_get_statement_tables(
         "key_metrics": await client.key_metrics(symbol, period, limit),
         "ratios": await client.ratios(symbol, period, limit),
         "financial_growth": await client.financial_growth(symbol, period, limit),
-        "audit_note": "These are financial tables; they do not replace official earnings releases or 8-K/6-K exhibits when the report requires them.",
+        "audit_note": "These are FMP financial tables. They do not replace opening/reviewing official earnings releases or 8-K/6-K exhibits when the report requires them.",
     }
 
 
@@ -85,12 +130,16 @@ async def fmp_search_sec_filings(
     from_date: str = "2025-01-01",
     to_date: str | None = None,
     limit: int = 100,
+    prioritize_for_report: bool = True,
 ) -> dict[str, Any]:
-    """Search SEC filings by symbol for 8-K, 10-Q, 10-K or other official evidence/fallback documents."""
+    """Search SEC filings and optionally prioritize 8-K/6-K earnings releases plus 10-Q/10-K report evidence."""
+    raw = await FMPClient().sec_filings(symbol, from_date=from_date, to_date=to_date, limit=limit)
     return {
         "symbol": symbol.upper(),
         "source_name": "FMP sec-filings-search/symbol",
-        "data": await FMPClient().sec_filings(symbol, from_date=from_date, to_date=to_date, limit=limit),
+        "prioritized": prioritize_sec_filings(raw) if prioritize_for_report else None,
+        "data": raw,
+        "audit_note": "The MCP can identify candidate filings, but the LLM/agent must open and read the actual earnings release or filing exhibit before marking it reviewed.",
     }
 
 
@@ -108,21 +157,63 @@ async def fmp_get_earnings_calendar(
 
 
 @mcp.tool()
-async def fmp_build_research_evidence_pack(symbol: str, min_year: int = 2025, requested_calls: int = 2) -> dict[str, Any]:
-    """Build a report-ready evidence pack: selected transcript periods, transcript payloads, financial tables, SEC filings and audit templates."""
-    return await build_evidence_pack(symbol=symbol, min_year=min_year, requested_calls=requested_calls)
+async def fmp_build_research_evidence_pack(
+    symbol: str,
+    min_year: int = 2025,
+    requested_calls: int = 2,
+    strict_report_workflow: bool = True,
+    include_transcript_text: bool = False,
+    max_transcript_chars: int = 24000,
+) -> dict[str, Any]:
+    """Build a strict report evidence manifest with selected periods, source status, financial tables, filings and next actions.
+
+    This tool is an orchestrator. It is intentionally conservative: it does not certify that the LLM has read full ECs.
+    For strict scoring workflows, use the returned recommended_next_actions and call fmp_get_earnings_call_transcript
+    for every selected period before producing a scorecard.
+    """
+    return await build_evidence_pack(
+        symbol=symbol,
+        min_year=min_year,
+        requested_calls=requested_calls,
+        strict_report_workflow=strict_report_workflow,
+        include_transcript_text=include_transcript_text,
+        max_transcript_chars=max_transcript_chars,
+    )
 
 
 @mcp.tool()
-async def research_report_contract(sector: Literal["pharma", "general"] = "pharma") -> dict[str, Any]:
+async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[str, Any]:
+    """Validate an evidence-pack payload mechanically and return blocking items / next actions before scoring."""
+    return validate_evidence_payload(evidence_pack)
+
+
+@mcp.tool()
+async def research_report_contract(sector: Literal["pharma", "healthcare_technology", "general"] = "healthcare_technology") -> dict[str, Any]:
     """Return the strict report contract: required sections, source-audit fields, score dimensions and sector overlay diagnostics."""
+    if sector == "pharma":
+        overlay_name = "pharma"
+        lenses = PHARMA_LENSES
+    elif sector == "healthcare_technology":
+        overlay_name = "healthcare_technology"
+        lenses = HEALTHCARE_TECH_LENSES
+    else:
+        overlay_name = "none"
+        lenses = []
     return {
         "required_sections": REPORT_OUTPUT_SECTIONS,
         "required_source_audit_fields": REQUIRED_SOURCE_FLAGS,
         "core_score_dimensions": CORE_SCORE_DIMENSIONS,
         "secondary_score_dimensions": SECONDARY_SCORE_DIMENSIONS,
-        "sector_overlay": "pharma" if sector == "pharma" else "none",
-        "pharma_lens_scores_diagnostic_only": PHARMA_LENSES if sector == "pharma" else [],
+        "sector_overlay": overlay_name,
+        "sector_lens_scores_diagnostic_only": lenses,
+        "workflow_contract": {
+            "evidence_pack_is_orchestrator_not_final_review": True,
+            "canonical_transcript_fetch_tool": "fmp_get_earnings_call_transcript",
+            "must_fetch_full_transcript_for_each_selected_period": True,
+            "must_read_prepared_remarks_and_qna_before_scoring": True,
+            "must_review_official_release_and_financial_tables_separately": True,
+            "process_failure_if_scorecard_before_quarter_audit": True,
+        },
         "scoring_guardrail": "Never produce scorecard before completing quarter-by-quarter coverage audit and actual source reading.",
     }
 
