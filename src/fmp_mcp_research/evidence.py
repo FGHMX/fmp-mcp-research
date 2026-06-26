@@ -4,63 +4,30 @@ import re
 from datetime import date
 from typing import Any, Literal
 
-from .fmp_client import FMPClient
-from .report_contract import REQUIRED_SOURCE_FLAGS, REPORT_OUTPUT_SECTIONS
 
 TranscriptSection = Literal["full", "prepared_remarks", "qna", "metadata"]
 
-
-# Strict Q&A start markers.
-# Do not treat introductory phrases such as
-# "a question-and-answer session will follow" as the actual Q&A start.
 QA_START_MARKERS = re.compile(
-    r"("
-    r"question-and-answer session\s*$|"
-    r"questions and answers\s*$|"
-    r"q&a session\s*$|"
+    r"(question-and-answer session\s*$|questions and answers\s*$|q&a session\s*$|"
     r"operator:\s*(we will now begin|we will now open|at this time we will conduct|we are now ready to begin).*question|"
-    r"operator:\s*our first question|"
-    r"operator:\s*\[operator instructions\].*?(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
-    r"operator:\s*(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
-    r"operator:\s*ladies and gentlemen.*?(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
-    r"our first question comes from|"
-    r"first question comes from|"
-    r"we take the first question|"
-    r"we take the next question|"
-    r"we take the last question"
-    r")",
+    r"operator:\s*our first question|our first question comes from|first question comes from|"
+    r"we take the first question|we take the next question|we take the last question)",
     re.I | re.M,
 )
-
-QA_MENTION_MARKERS = re.compile(
-    r"(question-and-answer|question and answer|questions and answers|q&a)",
-    re.I,
-)
-
+QA_MENTION_MARKERS = re.compile(r"(question-and-answer|question and answer|questions and answers|q&a)", re.I)
 FALSE_QA_INTRO_MARKERS = re.compile(
-    r"("
-    r"question-and-answer session will follow|"
-    r"q&a session will follow|"
-    r"questions? and answers? session will follow"
-    r")",
-    re.I,
-)
-
-QA_MARKERS = re.compile(
-    r"(question-and-answer|question and answer|questions and answers|q&a|operator instructions|we will now begin the question|first question)",
+    r"(question-and-answer session will follow|q&a session will follow|questions? and answers? session will follow)",
     re.I,
 )
 OPERATOR_MARKER = re.compile(r"\boperator\b\s*:|operator instructions", re.I)
 CLOSING_MARKERS = re.compile(
-    r"(this concludes|conference has now concluded|you may now disconnect|thank you for joining|thank you for your participation|end of (today'?s )?conference)",
-    re.I,
-)
-PREPARED_MARKERS = re.compile(
-    r"(prepared remarks|opening remarks|presentation|management discussion|turn the call over)",
+    r"(this concludes|conference has now concluded|you may now disconnect|thank you for joining|"
+    r"thank you for your participation|end of (today'?s )?conference)",
     re.I,
 )
 TRUNCATION_MARKERS = re.compile(
-    r"(\.\.\.|\[truncated\]|<truncated>|content truncated|output truncated|continued in next chunk)",
+    r"(\[truncated\]|\(truncated\)|\.\.\.\s*$|content truncated|output truncated|"
+    r"continued in next chunk|continued on next page|transcript ends|audio ends|call ends abruptly)",
     re.I,
 )
 QUESTION_LINE = re.compile(r"\b(question|analyst|operator)\b", re.I)
@@ -87,8 +54,7 @@ def _safe_int(value: Any) -> int | None:
 
 
 def extract_transcript_text(item: dict[str, Any]) -> str:
-    """Return the longest transcript-like text field from one FMP transcript item."""
-    candidates: list[str] = []
+    candidates = []
     for key in ("content", "transcript", "text"):
         value = item.get(key)
         if isinstance(value, str) and value.strip():
@@ -97,53 +63,19 @@ def extract_transcript_text(item: dict[str, Any]) -> str:
 
 
 def combine_transcript_text(items: list[dict[str, Any]]) -> str:
-    texts = [extract_transcript_text(item) for item in items]
-    return "\n\n".join(text for text in texts if text)
-
-
-def transcript_has_qna(transcript_item: dict[str, Any]) -> bool:
-    text = extract_transcript_text(transcript_item)
-    return bool(QA_START_MARKERS.search(text))
+    return "\n\n".join(text for item in items if (text := extract_transcript_text(item)))
 
 
 def split_transcript_sections(full_text: str) -> dict[str, Any]:
-    """Split a transcript into prepared remarks and Q&A.
-
-    Introductory phrases like "a question-and-answer session will follow"
-    are not treated as the real Q&A start.
-    """
     if not full_text:
-        return {
-            "prepared_remarks": "",
-            "qna": "",
-            "qna_start_offset": None,
-            "section_detection_warning": None,
-        }
-
+        return {"prepared_remarks": "", "qna": "", "qna_start_offset": None, "section_detection_warning": None}
     match = QA_START_MARKERS.search(full_text)
-
     if not match:
-        warning = (
-            "qna_mentioned_but_no_reliable_qna_start"
-            if QA_MENTION_MARKERS.search(full_text)
-            else None
-        )
-        return {
-            "prepared_remarks": full_text,
-            "qna": "",
-            "qna_start_offset": None,
-            "section_detection_warning": warning,
-        }
-
-    nearby = full_text[max(0, match.start() - 80): match.end() + 120]
+        warning = "qna_mentioned_but_no_reliable_qna_start" if QA_MENTION_MARKERS.search(full_text) else None
+        return {"prepared_remarks": full_text, "qna": "", "qna_start_offset": None, "section_detection_warning": warning}
+    nearby = full_text[max(0, match.start() - 80) : match.end() + 120]
     if FALSE_QA_INTRO_MARKERS.search(nearby):
-        return {
-            "prepared_remarks": full_text,
-            "qna": "",
-            "qna_start_offset": None,
-            "section_detection_warning": "qna_start_likely_false_positive",
-        }
-
+        return {"prepared_remarks": full_text, "qna": "", "qna_start_offset": None, "section_detection_warning": "qna_start_likely_false_positive"}
     return {
         "prepared_remarks": full_text[: match.start()].strip(),
         "qna": full_text[match.start() :].strip(),
@@ -153,29 +85,46 @@ def split_transcript_sections(full_text: str) -> dict[str, Any]:
 
 
 def chunk_text(text: str, chunk_size_chars: int = CHUNK_SIZE_CHARS) -> list[dict[str, Any]]:
-    chunks = []
-    if not text:
-        return chunks
+    chunks: list[dict[str, Any]] = []
     for index, start in enumerate(range(0, len(text), chunk_size_chars), start=1):
         end = min(start + chunk_size_chars, len(text))
-        chunks.append(
-            {
-                "chunk_index": index,
-                "total_chunks": None,
-                "start_char": start,
-                "end_char": end,
-                "is_final_chunk": end >= len(text),
-                "content": text[start:end],
-            }
-        )
+        chunks.append({"chunk_index": index, "total_chunks": None, "start_char": start, "end_char": end, "is_final_chunk": end >= len(text), "content": text[start:end]})
     total = len(chunks)
     for chunk in chunks:
         chunk["total_chunks"] = total
     return chunks
 
 
+def transcript_ends_mid_sentence(full_text: str) -> bool:
+    if not full_text:
+        return False
+    tail = full_text.strip()[-300:].strip()
+    if not tail:
+        return False
+    unfinished = (
+        "let me now take you through",
+        "let me take you through",
+        "i will now take you through",
+        "i'll now take you through",
+        "turn the call",
+        "turn it over",
+        "with that,",
+        "moving to",
+        "starting with",
+    )
+    lower_tail = tail.lower().rstrip(".!?\"'”’)]}")
+    if any(lower_tail.endswith(x) for x in unfinished):
+        return True
+    return not bool(re.search(r'[.!?]"?$|disconnect your lines\.?$|conclude.*call\.?$', tail, re.I))
+
+
+def has_real_explicit_truncation_marker(full_text: str) -> bool:
+    if not full_text:
+        return False
+    return bool(TRUNCATION_MARKERS.search(full_text))
+
+
 def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Mechanical checks that help the LLM distinguish source absence from truncation."""
     full_text = combine_transcript_text(items)
     sections = split_transcript_sections(full_text)
     qna = sections["qna"]
@@ -183,93 +132,88 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
     word_count = len(full_text.split())
     char_count = len(full_text)
     qna_word_count = len(qna.split())
-    prepared_word_count = len(prepared.split())
-
     has_text = char_count > 0
     qna_detected = bool(QA_START_MARKERS.search(full_text))
-    operator_intro_detected = bool(OPERATOR_MARKER.search(full_text))
-    operator_qna_start_detected = bool(QA_START_MARKERS.search(qna)) if qna else False
     operator_close_detected = bool(CLOSING_MARKERS.search(full_text))
     explicit_truncation_marker_detected = has_real_explicit_truncation_marker(full_text)
-    section_detection_warning = sections.get("section_detection_warning")
+    ends_mid_sentence = transcript_ends_mid_sentence(full_text)
     qna_mention_detected = bool(QA_MENTION_MARKERS.search(full_text))
-    prepared_remarks_available = bool(prepared.strip())
 
-    # Heuristic counts. They are not perfect, but they are explicit and auditable.
-    analyst_question_markers = len(QUESTION_LINE.findall(qna)) if qna else 0
-    management_answer_markers = len(ANSWER_LINE.findall(qna)) if qna else 0
-
-    truncation_reasons: list[str] = []
+    warnings: list[str] = []
     if not has_text:
-        truncation_reasons.append("empty_transcript_payload")
+        warnings.append("empty_transcript_payload")
     if has_text and word_count < MIN_FULL_CALL_WORDS:
-        truncation_reasons.append("too_short_for_typical_full_earnings_call")
+        warnings.append("too_short_for_typical_full_earnings_call")
     if has_text and not qna_detected and qna_mention_detected:
-        truncation_reasons.append("qna_mentioned_but_reliable_qna_start_not_detected")
+        warnings.append("qna_mentioned_but_reliable_qna_start_not_detected")
     elif has_text and not qna_detected:
-        truncation_reasons.append("qna_start_not_detected")
-    if section_detection_warning:
-        truncation_reasons.append(section_detection_warning)
+        warnings.append("qna_start_not_detected")
+    if sections.get("section_detection_warning"):
+        warnings.append(sections["section_detection_warning"])
     if qna_detected and qna_word_count < 250:
-        truncation_reasons.append("qna_detected_but_too_short")
+        warnings.append("qna_detected_but_too_short")
     if has_text and not operator_close_detected:
-        truncation_reasons.append("operator_close_not_detected")
+        warnings.append("operator_close_not_detected")
     if explicit_truncation_marker_detected:
-        truncation_reasons.append("explicit_truncation_marker_detected")
+        warnings.append("explicit_truncation_marker_detected")
+    if ends_mid_sentence:
+        warnings.append("ends_mid_sentence")
 
-    likely_complete = has_text and not truncation_reasons
-    qna_likely_complete = qna_detected and qna_word_count >= 250 and operator_close_detected
+    strong_incomplete = (
+        not has_text
+        or explicit_truncation_marker_detected
+        or ends_mid_sentence
+        or (word_count < MIN_FULL_CALL_WORDS and not operator_close_detected and not qna_detected)
+    )
+    complete_with_warnings = has_text and not strong_incomplete
 
     return {
         "has_text": has_text,
         "returned_character_count": char_count,
         "total_character_count": char_count,
         "word_count": word_count,
-        "prepared_remarks_available": prepared_remarks_available,
-        "prepared_remarks_word_count": prepared_word_count,
-        "prepared_remarks_complete": prepared_remarks_available and word_count >= MIN_FULL_CALL_WORDS,
+        "prepared_remarks_available": bool(prepared.strip()),
+        "prepared_remarks_word_count": len(prepared.split()),
         "qna_available": qna_detected,
         "qna_word_count": qna_word_count,
-        "qna_complete": qna_likely_complete,
-        "full_transcript_complete": likely_complete,
-        "operator_intro_detected": operator_intro_detected,
-        "operator_qna_start_detected": operator_qna_start_detected,
+        "qna_complete": qna_detected and qna_word_count >= 250 and operator_close_detected,
+        "full_transcript_complete": complete_with_warnings and operator_close_detected,
+        "transcript_quality_status": "complete" if complete_with_warnings and operator_close_detected else ("usable_with_warnings" if complete_with_warnings else "incomplete"),
+        "operator_intro_detected": bool(OPERATOR_MARKER.search(full_text)),
+        "operator_qna_start_detected": bool(QA_START_MARKERS.search(qna)) if qna else False,
         "operator_close_detected": operator_close_detected,
         "explicit_truncation_marker_detected": explicit_truncation_marker_detected,
-        "ends_mid_sentence": transcript_ends_mid_sentence(full_text),
-        "section_detection_warning": section_detection_warning,
+        "ends_mid_sentence": ends_mid_sentence,
+        "section_detection_warning": sections.get("section_detection_warning"),
         "qna_mention_detected": qna_mention_detected,
-        "likely_truncated_or_incomplete": not likely_complete,
-        "truncation_reasons": truncation_reasons,
+        "likely_truncated_or_incomplete": not complete_with_warnings,
+        "quality_warnings": warnings,
+        "truncation_reasons": warnings,
         "qna_validation": {
-            "analyst_question_markers_detected": analyst_question_markers,
-            "management_answer_markers_detected": management_answer_markers,
-            "qna_likely_complete": qna_likely_complete,
+            "analyst_question_markers_detected": len(QUESTION_LINE.findall(qna)) if qna else 0,
+            "management_answer_markers_detected": len(ANSWER_LINE.findall(qna)) if qna else 0,
+            "qna_likely_complete": qna_detected and qna_word_count >= 250 and operator_close_detected,
         },
     }
 
 
 def normalize_transcript_dates(raw_dates: Any, min_year: int = 2025, max_items: int = 2) -> list[dict[str, Any]]:
-    dates = _safe_list(raw_dates)
-    normalized: list[dict[str, Any]] = []
-    for item in dates:
+    normalized = []
+    for item in _safe_list(raw_dates):
         year_i = _safe_int(item.get("year") or item.get("fiscalYear"))
         q_i = _safe_int(item.get("quarter") or item.get("fiscalQuarter"))
-        if year_i is None or q_i is None:
+        if year_i is None or q_i is None or year_i < min_year:
             continue
-        if year_i >= min_year:
-            normalized.append(
-                {
-                    "year": year_i,
-                    "quarter": q_i,
-                    "period_label": f"Q{q_i} {year_i}",
-                    "call_date": item.get("date") or item.get("callDate") or item.get("fillingDate"),
-                    "transcript_available": True,
-                    "source": "FMP earning-call-transcript-dates",
-                    "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
-                    "raw": item,
-                }
-            )
+        normalized.append({
+            "year": year_i,
+            "quarter": q_i,
+            "period_label": f"Q{q_i} {year_i}",
+            "call_date": item.get("date") or item.get("callDate") or item.get("fillingDate"),
+            "transcript_available": True,
+            "source": "FMP earning-call-transcript-dates",
+            "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
+            "raw": item,
+        })
     normalized.sort(key=lambda x: (x["year"], x["quarter"], str(x.get("call_date") or "")), reverse=True)
     return normalized[:max_items]
 
@@ -278,10 +222,8 @@ def filter_by_period(rows: Any, periods: list[dict[str, Any]]) -> list[dict[str,
     wanted = {(p["year"], f"Q{p['quarter']}") for p in periods}
     output = []
     for row in _safe_list(rows):
-        fiscal_year = row.get("calendarYear") or row.get("year") or row.get("fiscalYear")
-        period = row.get("period") or row.get("quarter")
-        year_i = _safe_int(fiscal_year)
-        period_s = str(period).upper() if period is not None else ""
+        year_i = _safe_int(row.get("calendarYear") or row.get("year") or row.get("fiscalYear"))
+        period_s = str(row.get("period") or row.get("quarter") or "").upper()
         if year_i is not None and (year_i, period_s) in wanted:
             output.append(row)
     return output
@@ -297,11 +239,7 @@ def financial_table_record(name: str, rows: Any, periods: list[dict[str, Any]], 
         "match_status": "exact_period_match" if matched else "no_exact_period_match",
         "fallback_rows": fallback_rows,
         "fallback_used": bool(fallback_rows),
-        "audit_note": (
-            "Exact rows matched to selected earnings-call periods."
-            if matched
-            else "No exact period match; agent must not treat fallback/latest rows as reviewed for selected periods unless manually verified."
-        ),
+        "audit_note": "Exact rows matched to selected earnings-call periods." if matched else "No exact period match; do not treat fallback/latest rows as period-reviewed unless manually verified.",
     }
 
 
@@ -327,165 +265,8 @@ def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
     }
 
 
-def transcript_ends_mid_sentence(full_text: str) -> bool:
-    """Detect an abrupt transcript ending.
-
-    This is intentionally conservative. A transcript should not be marked
-    incomplete just because Q&A was not detected. But if it ends in an
-    obvious unfinished sentence, that is strong evidence of source truncation.
-    """
-    if not full_text:
-        return False
-
-    tail = full_text.strip()[-300:].strip()
-    if not tail:
-        return False
-
-    unfinished_endings = (
-        "let me now take you through",
-        "let me take you through",
-        "i will now take you through",
-        "i'll now take you through",
-        "turn the call",
-        "turn it over",
-        "with that,",
-        "moving to",
-        "starting with",
-    )
-
-    lower_tail = tail.lower().rstrip(".!?\"'”’)]}")
-    if any(lower_tail.endswith(x) for x in unfinished_endings):
-        return True
-
-    # If the transcript does not end with sentence punctuation or a normal
-    # operator close, treat it as suspicious, but only as one signal.
-    if not re.search(r'[.!?]"?$|disconnect your lines\.?$|conclude.*call\.?$', tail, re.I):
-        return True
-
-    return False
-
-
-def has_real_explicit_truncation_marker(full_text: str) -> bool:
-    """Detect real truncation markers.
-
-    Do not treat [indiscernible] as truncation. That only means one phrase
-    could not be transcribed, not that the whole transcript is incomplete.
-    """
-    if not full_text:
-        return False
-
-    real_markers = re.compile(
-        r"("
-        r"\[truncated\]|"
-        r"\(truncated\)|"
-        r"\.\.\.\s*$|"
-        r"continued on next page|"
-        r"transcript ends|"
-        r"audio ends|"
-        r"call ends abruptly"
-        r")",
-        re.I,
-    )
-    return bool(real_markers.search(full_text))
-
-
-def build_transcript_quality_status(
-    *,
-    has_text: bool,
-    word_count: int,
-    transcript_available: bool,
-    content_truncated_by_tool: bool,
-    content_truncated_by_pack: bool,
-    operator_close_detected: bool,
-    qna_available: bool,
-    explicit_truncation_marker_detected: bool,
-    ends_mid_sentence: bool,
-) -> dict[str, object]:
-    """Return softer transcript status, detail, confidence and warnings.
-
-    Q&A detection failures should be warnings, not automatic incomplete status.
-    """
-    warnings: list[str] = []
-
-    if not has_text:
-        warnings.append("empty_transcript")
-
-    if content_truncated_by_tool:
-        warnings.append("content_truncated_by_tool")
-
-    if content_truncated_by_pack:
-        warnings.append("content_truncated_by_pack")
-
-    if explicit_truncation_marker_detected:
-        warnings.append("explicit_truncation_marker_detected")
-
-    if not operator_close_detected:
-        warnings.append("operator_close_not_detected")
-
-    if not qna_available:
-        warnings.append("qna_section_split_uncertain")
-
-    if ends_mid_sentence:
-        warnings.append("ends_mid_sentence")
-
-    if word_count < 2500:
-        warnings.append("too_short_for_typical_full_earnings_call")
-
-    if not transcript_available:
-        return {
-            "status": "missing",
-            "detail": "missing",
-            "confidence": "low",
-            "quality_warnings": warnings,
-        }
-
-    strong_incomplete_evidence = (
-        not has_text
-        or content_truncated_by_tool
-        or content_truncated_by_pack
-        or explicit_truncation_marker_detected
-        or ends_mid_sentence
-        or (
-            word_count < 2500
-            and not operator_close_detected
-            and not qna_available
-        )
-        or (
-            not operator_close_detected
-            and ends_mid_sentence
-        )
-    )
-
-    if strong_incomplete_evidence:
-        return {
-            "status": "incomplete",
-            "detail": (
-                "tool_truncated"
-                if content_truncated_by_tool or content_truncated_by_pack
-                else "source_incomplete"
-            ),
-            "confidence": "low",
-            "quality_warnings": warnings,
-        }
-
-    # Complete, but confidence may be medium if section split is uncertain.
-    if not operator_close_detected or not qna_available:
-        return {
-            "status": "complete",
-            "detail": "complete_with_warnings",
-            "confidence": "medium",
-            "quality_warnings": warnings,
-        }
-
-    return {
-        "status": "complete",
-        "detail": "complete",
-        "confidence": "high",
-        "quality_warnings": warnings,
-    }
-
-
 def build_transcript_payload(
+    *,
     symbol: str,
     year: int,
     quarter: int,
@@ -493,384 +274,155 @@ def build_transcript_payload(
     section: TranscriptSection = "full",
     include_full_text: bool = True,
     max_chars: int = DEFAULT_TRANSCRIPT_CHAR_BUDGET,
-    chunk_size_chars: int = CHUNK_SIZE_CHARS,
 ) -> dict[str, Any]:
     items = _safe_list(raw)
     full_text = combine_transcript_text(items)
     sections = split_transcript_sections(full_text)
-    completeness = assess_transcript_completeness(items)
-
-    if section == "prepared_remarks":
-        selected_text = sections["prepared_remarks"]
-    elif section == "qna":
-        selected_text = sections["qna"]
-    elif section == "metadata":
-        selected_text = ""
-    else:
-        selected_text = full_text
-
-    content_truncated_by_tool = include_full_text and len(selected_text) > max_chars
-    returned_text = selected_text[:max_chars] if content_truncated_by_tool else selected_text
-    chunks = chunk_text(selected_text, chunk_size_chars=chunk_size_chars) if selected_text else []
-
-    transcript_available = bool(items and full_text)
-    source_complete = bool(completeness["full_transcript_complete"])
-    returned_complete = bool(include_full_text and not content_truncated_by_tool and selected_text)
-    qna_included = section in {"full", "qna"} and bool(sections["qna"]) and not (section == "full" and content_truncated_by_tool and len(returned_text) < (sections["qna_start_offset"] or 10**12))
-
-    content_truncated_by_pack = False
-
-    quality_status = build_transcript_quality_status(
-        has_text=bool(completeness.get("has_text")),
-        word_count=int(completeness.get("word_count") or 0),
-        transcript_available=transcript_available,
-        content_truncated_by_tool=content_truncated_by_tool,
-        content_truncated_by_pack=content_truncated_by_pack,
-        operator_close_detected=bool(completeness.get("operator_close_detected")),
-        qna_available=bool(completeness.get("qna_available")),
-        explicit_truncation_marker_detected=bool(
-            completeness.get("explicit_truncation_marker_detected")
-        ),
-        ends_mid_sentence=bool(completeness.get("ends_mid_sentence")),
-    )
-
-    status = str(quality_status["status"])
-    status_detail = str(quality_status["detail"])
-    transcript_confidence = str(quality_status["confidence"])
-    quality_warnings = list(quality_status["quality_warnings"])
-
-    record = {
+    selected_text = {
+        "full": full_text,
+        "prepared_remarks": sections["prepared_remarks"],
+        "qna": sections["qna"],
+        "metadata": "",
+    }[section]
+    content_truncated_by_tool = len(selected_text) > max_chars
+    returned_text = selected_text[:max_chars] if include_full_text else ""
+    assessment = assess_transcript_completeness(items)
+    assessment["total_character_count"] = len(selected_text)
+    assessment["returned_character_count"] = len(returned_text)
+    return {
         "symbol": symbol.upper(),
         "year": year,
         "quarter": quarter,
-        "period_label": f"Q{quarter} {year}",
+        "section": section,
         "source_name": "FMP earning-call-transcript",
-        "call_exists": True,
-        "transcript_available": transcript_available,
-        "transcript_status": status,
-        "transcript_status_detail": status_detail,
-        "transcript_confidence": transcript_confidence,
-        "quality_warnings": quality_warnings,
-        "section_returned": section,
-        "full_transcript_included_in_payload": section == "full" and returned_complete,
-        "included_content_is_excerpt": bool(selected_text) and not returned_complete,
+        "transcript_available": bool(items and full_text),
         "content_truncated_by_tool": content_truncated_by_tool,
-        "content_truncated_by_pack": content_truncated_by_tool,
         "returned_character_count": len(returned_text),
         "total_character_count": len(selected_text),
-        "full_source_character_count": len(full_text),
-        "qna_detected_in_source": completeness["qna_available"],
-        "qna_included_in_payload": qna_included,
-        "qna_complete": completeness["qna_complete"],
-        "prepared_remarks_available": completeness["prepared_remarks_available"],
-        "prepared_remarks_complete": completeness["prepared_remarks_complete"],
-        "operator_qna_start_detected": completeness["operator_qna_start_detected"],
-        "operator_close_detected": completeness["operator_close_detected"],
-        "section_detection_warning": completeness.get("section_detection_warning"),
-        "completeness": completeness,
-        "sections_metadata": {
-            "prepared_remarks_character_count": len(sections["prepared_remarks"]),
-            "qna_character_count": len(sections["qna"]),
-            "qna_start_offset": sections["qna_start_offset"],
-        },
-        "chunks_manifest": [
-            {k: v for k, v in chunk.items() if k != "content"}
-            for chunk in chunks
-        ],
-        "text": returned_text if include_full_text and section != "metadata" else None,
-        "sections": None,
-        "recommended_followup_tool": "fmp_get_earnings_call_transcript" if status != "complete" or content_truncated_by_tool else None,
-        "must_call_dedicated_transcript_tool": status != "complete" or content_truncated_by_tool,
-        "score_allowed_from_current_payload": status == "complete" and qna_included,
-        "next_best_action": None,
-        "warning": None,
+        "full_text": returned_text if section == "full" else None,
+        "prepared_remarks": returned_text if section == "prepared_remarks" else (sections["prepared_remarks"][:max_chars] if section == "full" and include_full_text else None),
+        "qna": returned_text if section == "qna" else (sections["qna"][:max_chars] if section == "full" and include_full_text else None),
+        "chunks": chunk_text(selected_text) if content_truncated_by_tool else [],
+        "completeness": assessment,
+        "recommended_next_actions": transcript_next_actions(symbol.upper(), year, quarter, section, content_truncated_by_tool, assessment),
     }
 
-    if section == "full" and include_full_text and not content_truncated_by_tool:
-        record["sections"] = {"prepared_remarks": sections["prepared_remarks"], "qna": sections["qna"]}
 
-    if record["must_call_dedicated_transcript_tool"]:
-        record["next_best_action"] = {
-            "tool": "fmp_get_earnings_call_transcript",
-            "arguments": {"symbol": symbol.upper(), "year": year, "quarter": quarter, "section": "full"},
-            "reason": "Transcript is missing, incomplete, or not fully included in the current payload.",
-        }
-        record["warning"] = (
-            "Transcript evidence is not certified as fully returned in this payload. "
-            "Do not mark full call or Q&A as reviewed until the dedicated transcript tool returns complete prepared remarks and Q&A."
-        )
-
-    return record
-
-
-async def fetch_transcript_with_quality_retries(
-    client: FMPClient,
-    symbol: str,
-    year: int,
-    quarter: int,
-    semantic_attempts: int = 3,
-) -> dict[str, Any]:
-    attempts = []
-    best: dict[str, Any] | None = None
-    for attempt_number in range(1, max(1, semantic_attempts) + 1):
-        raw = await client.transcript(symbol, year, quarter)
-        items = _safe_list(raw)
-        completeness = assess_transcript_completeness(items)
-        attempt = {
-            "attempt_number": attempt_number,
-            "success": completeness["full_transcript_complete"],
-            "word_count": completeness["word_count"],
-            "qna_complete": completeness["qna_complete"],
-            "operator_close_detected": completeness["operator_close_detected"],
-            "likely_truncated_or_incomplete": completeness["likely_truncated_or_incomplete"],
-            "truncation_reasons": completeness["truncation_reasons"],
-            "raw": raw,
-            "items": items,
-            "completeness": completeness,
-        }
-        attempts.append(attempt)
-        if best is None or attempt["word_count"] > best["word_count"]:
-            best = attempt
-        if completeness["full_transcript_complete"]:
-            break
-    return {"attempts": attempts, "best_attempt": best}
+def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, truncated: bool, assessment: dict[str, Any]) -> list[dict[str, Any]]:
+    actions = []
+    if truncated and section == "full":
+        for next_section in ("prepared_remarks", "qna"):
+            actions.append({
+                "tool": "fmp_get_earnings_call_transcript",
+                "arguments": {"symbol": symbol, "year": year, "quarter": quarter, "section": next_section},
+                "reason": f"Fetch {next_section} separately because the full transcript exceeded the server payload budget.",
+            })
+    if assessment.get("transcript_quality_status") == "incomplete":
+        actions.append({
+            "tool": "fmp_list_transcript_dates",
+            "arguments": {"symbol": symbol, "min_year": max(2000, year - 1), "limit": 4},
+            "reason": "Confirm the period exists and check adjacent periods before treating the transcript as unavailable or incomplete.",
+        })
+    return actions
 
 
 async def build_evidence_pack(
+    *,
     symbol: str,
     min_year: int = 2025,
     requested_calls: int = 2,
     strict_report_workflow: bool = True,
     include_transcript_text: bool = False,
     max_transcript_chars: int = 24_000,
-    transcript_semantic_attempts: int = 3,
 ) -> dict[str, Any]:
+    from .fmp_client import FMPClient
+
     client = FMPClient()
-    symbol = symbol.upper()
-    requested_calls = max(1, requested_calls)
+    transcript_dates = await client.transcript_dates(symbol)
+    selected_periods = normalize_transcript_dates(transcript_dates, min_year=min_year, max_items=requested_calls)
+    income, balance, cash, metrics, ratios, growth = await _fetch_financials(client, symbol, requested_calls)
+    filings = await client.sec_filings(symbol, from_date=f"{min_year}-01-01", to_date=date.today().isoformat())
 
-    profile = await client.profile(symbol)
-    raw_dates = await client.transcript_dates(symbol)
-    periods = normalize_transcript_dates(raw_dates, min_year=min_year, max_items=requested_calls)
+    transcript_statuses = []
+    for period in selected_periods:
+        transcript_statuses.append({
+            "year": period["year"],
+            "quarter": period["quarter"],
+            "transcript_available": True,
+            "full_call_text_included": include_transcript_text,
+            "full_call_text_read_by_agent": False,
+            "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
+        })
 
-    blocking_items: list[dict[str, Any]] = []
-    recommended_next_actions: list[dict[str, Any]] = []
-    evidence_manifest: list[dict[str, Any]] = []
-    transcripts_by_period: list[dict[str, Any]] = []
-
-    if not periods:
-        issue = {
-            "issue": "no_earnings_call_dates_found_at_or_after_min_year",
-            "min_year": min_year,
-            "reason": "No transcript periods were discovered for the requested min_year threshold.",
-        }
-        blocking_items.append(issue)
-        recommended_next_actions.append(
-            {
-                "tool": "fmp_list_transcript_dates",
-                "arguments": {"symbol": symbol, "min_year": min_year - 1, "limit": requested_calls},
-                "reason": "Find the latest available earnings-call transcript periods by widening the year filter.",
-            }
-        )
-
-    for p in periods:
-        fetched = await fetch_transcript_with_quality_retries(
-            client=client,
-            symbol=symbol,
-            year=p["year"],
-            quarter=p["quarter"],
-            semantic_attempts=transcript_semantic_attempts,
-        )
-        best = fetched["best_attempt"]
-        raw = best["raw"] if best else []
-        payload = build_transcript_payload(
-            symbol=symbol,
-            year=p["year"],
-            quarter=p["quarter"],
-            raw=raw,
-            section="full",
-            include_full_text=include_transcript_text,
-            max_chars=max_transcript_chars,
-        )
-        payload["discovery"] = p
-        payload["semantic_fetch_attempts"] = [
-            {k: v for k, v in attempt.items() if k not in {"raw", "items", "completeness"}}
-            for attempt in fetched["attempts"]
-        ]
-        payload["raw_items"] = _safe_list(raw) if include_transcript_text and not payload["content_truncated_by_tool"] else None
-        transcripts_by_period.append(payload)
-
-        requires_followup = payload["must_call_dedicated_transcript_tool"] or not payload["qna_complete"]
-        evidence_manifest.append(
-            {
-                "document_type": "earnings_call_transcript",
-                "symbol": symbol,
-                "period": payload["period_label"],
-                "available": payload["transcript_available"],
-                "included_in_payload": include_transcript_text,
-                "complete_in_payload": payload["full_transcript_included_in_payload"],
-                "source_complete": payload["completeness"]["full_transcript_complete"],
-                "qna_detected_in_source": payload["qna_detected_in_source"],
-                "qna_included_in_payload": payload["qna_included_in_payload"],
-                "requires_followup_fetch": requires_followup,
-                "recommended_tool": "fmp_get_earnings_call_transcript" if requires_followup else None,
-            }
-        )
-        if requires_followup:
-            action = {
-                "tool": "fmp_get_earnings_call_transcript",
-                "arguments": {"symbol": symbol, "year": p["year"], "quarter": p["quarter"], "section": "full"},
-                "reason": f"{payload['period_label']} transcript/Q&A is not certified as complete in the current evidence pack payload.",
-            }
-            recommended_next_actions.append(action)
-            blocking_items.append(
-                {
-                    "period": payload["period_label"],
-                    "issue": "earnings_call_transcript_or_qna_not_certified_complete_in_current_payload",
-                    "required_action": action,
-                }
-            )
-
-    income = await client.income_statement(symbol, period="quarter", limit=12)
-    balance = await client.balance_sheet(symbol, period="quarter", limit=12)
-    cashflow = await client.cash_flow(symbol, period="quarter", limit=12)
-    key_metrics = await client.key_metrics(symbol, period="quarter", limit=12)
-    ratios = await client.ratios(symbol, period="quarter", limit=12)
-    growth = await client.financial_growth(symbol, period="quarter", limit=12)
-
-    tables = {
-        "income_statement": financial_table_record("income_statement", income, periods, allow_fallback=not strict_report_workflow),
-        "balance_sheet": financial_table_record("balance_sheet", balance, periods, allow_fallback=not strict_report_workflow),
-        "cash_flow_statement": financial_table_record("cash_flow_statement", cashflow, periods, allow_fallback=not strict_report_workflow),
-        "key_metrics": financial_table_record("key_metrics", key_metrics, periods, allow_fallback=not strict_report_workflow),
-        "ratios": financial_table_record("ratios", ratios, periods, allow_fallback=not strict_report_workflow),
-        "financial_growth": financial_table_record("financial_growth", growth, periods, allow_fallback=not strict_report_workflow),
-    }
-    for name, record in tables.items():
-        evidence_manifest.append(
-            {
-                "document_type": "financial_table",
-                "table_name": name,
-                "symbol": symbol,
-                "periods_requested": [p["period_label"] for p in periods],
-                "available": bool(record["matched_rows"] or record["fallback_rows"]),
-                "included_in_payload": True,
-                "complete_in_payload": bool(record["matched_rows"]),
-                "requires_followup_fetch": not bool(record["matched_rows"]),
-                "match_status": record["match_status"],
-            }
-        )
-        if not record["matched_rows"]:
-            blocking_items.append({"issue": "financial_table_no_exact_period_match", "table_name": name})
-
-    current_year = date.today().year
-    sec = await client.sec_filings(symbol, from_date=f"{min_year}-01-01", to_date=f"{current_year}-12-31", limit=100)
-    sec_prioritized = prioritize_sec_filings(sec)
-    for p in periods:
-        evidence_manifest.append(
-            {
-                "document_type": "official_earnings_release_or_filing",
-                "symbol": symbol,
-                "period": p["period_label"],
-                "available": bool(sec_prioritized["earnings_release_candidates"] or sec_prioritized["relevant_filings_for_report"]),
-                "included_in_payload": True,
-                "complete_in_payload": False,
-                "requires_followup_fetch": True,
-                "recommended_tool": "fmp_search_sec_filings",
-                "audit_note": "MCP can identify candidate filings; the LLM/agent must open/read the actual release or 8-K exhibit before marking reviewed.",
-            }
-        )
-        recommended_next_actions.append(
-            {
-                "tool": "fmp_search_sec_filings",
-                "arguments": {"symbol": symbol, "from_date": f"{min_year}-01-01", "to_date": f"{current_year}-12-31", "limit": 100},
-                "reason": f"Open/read the official earnings release or 8-K/6-K exhibit for {p['period_label']} before scoring.",
-            }
-        )
-
-    quarter_audit = []
-    for p in periods:
-        period_label = p["period_label"]
-        tp = next((x for x in transcripts_by_period if x["year"] == p["year"] and x["quarter"] == p["quarter"]), None)
-        quarter_audit.append(
-            {
-                "quarter": period_label,
-                "earnings_call_exists": "yes" if tp and tp["call_exists"] else "no",
-                "transcript_available": "yes" if tp and tp["transcript_available"] else "no",
-                "full_call_text_returned_to_agent": "yes" if tp and tp["full_transcript_included_in_payload"] else "no",
-                "full_call_text_read": "unknown_agent_must_confirm_after_dedicated_fetch",
-                "qna_detected_in_source": "yes" if tp and tp["qna_detected_in_source"] else "no",
-                "qna_returned_to_agent": "yes" if tp and tp["qna_included_in_payload"] else "no",
-                "qna_reviewed": "unknown_agent_must_confirm_after_dedicated_fetch",
-                "earnings_release_available": "yes_candidate" if sec_prioritized["earnings_release_candidates"] else "unknown_or_requires_ir_edgar_fallback",
-                "earnings_release_reviewed": "unknown_agent_must_confirm",
-                "financial_tables_available": "yes" if any(tables[name]["matched_rows"] for name in tables) else "no_exact_period_match",
-                "financial_tables_reviewed": "unknown_agent_must_confirm",
-                "main_topic": "agent_to_extract_from_full_call",
-                "main_risk": "agent_to_extract_from_full_call_qna_and_release",
-                "confidence_impact": "blocking_until_full_transcript_qna_release_and_financial_tables_are_reviewed",
-            }
-        )
-
-    ready_to_score = False
-    if not strict_report_workflow:
-        ready_to_score = len(blocking_items) == 0
+    financial_tables = [
+        financial_table_record("income_statement", income, selected_periods),
+        financial_table_record("balance_sheet", balance, selected_periods),
+        financial_table_record("cash_flow_statement", cash, selected_periods),
+        financial_table_record("key_metrics", metrics, selected_periods),
+        financial_table_record("ratios", ratios, selected_periods),
+        financial_table_record("financial_growth", growth, selected_periods),
+    ]
+    blocking_items = []
+    if len(selected_periods) < requested_calls:
+        blocking_items.append("fewer_transcript_periods_found_than_requested")
+    if strict_report_workflow:
+        blocking_items.append("agent_must_fetch_and_read_each_selected_transcript_before_scoring")
+        blocking_items.append("agent_must_review_official_release_or_relevant_filing_before_scoring")
 
     return {
-        "symbol": symbol,
-        "profile": profile,
-        "requested_policy": {
-            "min_year": min_year,
-            "requested_calls": requested_calls,
-            "strict_report_workflow": strict_report_workflow,
-            "include_transcript_text": include_transcript_text,
-            "max_transcript_chars": max_transcript_chars,
-            "transcript_semantic_attempts": transcript_semantic_attempts,
-            "canonical_full_transcript_tool": "fmp_get_earnings_call_transcript",
+        "evidence_pack_version": "0.3.0",
+        "symbol": symbol.upper(),
+        "selected_periods": selected_periods,
+        "evidence_manifest": {
+            "transcripts": transcript_statuses,
+            "financial_tables": financial_tables,
+            "sec_filings": prioritize_sec_filings(filings),
         },
-        "selected_periods": periods,
-        "transcript_dates_raw": raw_dates,
-        "transcripts": transcripts_by_period,
-        "financial_tables": tables,
-        "sec_filings": sec_prioritized,
-        "evidence_manifest": evidence_manifest,
-        "source_audit_template": {flag: "agent_to_complete_after_actual_source_reading" for flag in REQUIRED_SOURCE_FLAGS},
-        "quarter_by_quarter_coverage_audit_template": quarter_audit,
+        "source_audit_template": [{"period_label": p["period_label"], "full_call_text_read": "no", "qna_reviewed": "no", "official_release_reviewed": "no", "financial_tables_reviewed": "no"} for p in selected_periods],
         "scoring_readiness": {
-            "ready_to_score": ready_to_score,
-            "score_allowed_now": ready_to_score,
+            "allowed": not strict_report_workflow and not blocking_items,
             "blocking_items": blocking_items,
-            "recommended_next_actions": recommended_next_actions,
-            "guardrail": (
-                "This evidence pack identifies and audits required sources but does not certify agent review. "
-                "For strict report workflows, call fmp_get_earnings_call_transcript for every selected period and read prepared remarks plus Q&A before scoring."
-            ),
+            "strict_report_workflow": strict_report_workflow,
         },
-        "process_checklist": {
-            "selected_two_recent_calls_from_min_year": len(periods) == requested_calls,
-            "dedicated_transcript_fetch_required_for_each_selected_period": True,
-            "earnings_release_review_required": True,
-            "financial_tables_review_required": True,
-            "score_allowed_now": ready_to_score,
-        },
-        "report_required_sections": REPORT_OUTPUT_SECTIONS,
-        "important_warning": (
-            "WARNING: fmp_build_research_evidence_pack is an orchestrator/manifest tool, not proof that full transcripts were read. "
-            "If transcript text is omitted or truncated here, do not treat it as missing in the source. Use fmp_get_earnings_call_transcript."
-        ),
+        "recommended_next_actions": [
+            {
+                "tool": "fmp_get_earnings_call_transcript",
+                "arguments": {"symbol": symbol.upper(), "year": p["year"], "quarter": p["quarter"], "section": "full"},
+                "reason": "Fetch and read the full transcript before scoring.",
+            }
+            for p in selected_periods
+        ],
     }
+
+
+async def _fetch_financials(client: Any, symbol: str, limit: int) -> tuple[Any, Any, Any, Any, Any, Any]:
+    period = "quarter"
+    return (
+        await client.income_statement(symbol, period, limit),
+        await client.balance_sheet(symbol, period, limit),
+        await client.cash_flow(symbol, period, limit),
+        await client.key_metrics(symbol, period, limit),
+        await client.ratios(symbol, period, limit),
+        await client.financial_growth(symbol, period, limit),
+    )
 
 
 def validate_evidence_payload(evidence_pack: dict[str, Any]) -> dict[str, Any]:
-    """Offline validator for an evidence-pack payload. It does not infer agent reading."""
-    manifest = evidence_pack.get("evidence_manifest", [])
-    blocking = []
-    for item in manifest:
-        if item.get("requires_followup_fetch"):
-            blocking.append(item)
+    blocking = list(evidence_pack.get("scoring_readiness", {}).get("blocking_items", []))
+    periods = evidence_pack.get("selected_periods") or []
+    if not periods:
+        blocking.append("no_selected_periods")
+    audit_rows = evidence_pack.get("source_audit_template") or []
+    for row in audit_rows:
+        if row.get("full_call_text_read") != "yes":
+            blocking.append(f"full_call_text_not_read:{row.get('period_label')}")
+        if row.get("qna_reviewed") != "yes":
+            blocking.append(f"qna_not_reviewed:{row.get('period_label')}")
+        if row.get("official_release_reviewed") != "yes":
+            blocking.append(f"official_release_not_reviewed:{row.get('period_label')}")
     return {
-        "symbol": evidence_pack.get("symbol"),
-        "ready_to_score": not blocking and evidence_pack.get("scoring_readiness", {}).get("ready_to_score", False),
-        "blocking_items": blocking,
-        "recommended_next_actions": evidence_pack.get("scoring_readiness", {}).get("recommended_next_actions", []),
+        "evidence_pack_version": evidence_pack.get("evidence_pack_version"),
+        "allowed": not blocking,
+        "blocking_items": sorted(set(blocking)),
+        "recommended_next_actions": evidence_pack.get("recommended_next_actions", []),
     }

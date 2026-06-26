@@ -1,8 +1,7 @@
 services:
   fmp-mcp-research:
     build: .
+    env_file: .env
     ports:
       - "8000:8000"
-    env_file:
-      - .env
     restart: unless-stopped
