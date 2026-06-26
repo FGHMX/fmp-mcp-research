@@ -70,6 +70,9 @@ async def fmp_list_transcript_dates(symbol: str, min_year: int = 2025, limit: in
     }
 
 
+TRANSCRIPT_TOOL_MAX_CHARS = 200_000
+
+
 @mcp.tool()
 async def fmp_get_earnings_call_transcript(
     symbol: str,
@@ -77,7 +80,6 @@ async def fmp_get_earnings_call_transcript(
     quarter: int,
     section: TranscriptSection = "full",
     include_text: bool = True,
-    max_chars: int = 120000,
 ) -> dict[str, Any]:
     """Canonical fetch for one earnings-call transcript with completeness/Q&A/truncation metadata.
 
@@ -93,12 +95,12 @@ async def fmp_get_earnings_call_transcript(
         raw=data,
         section=section,
         include_full_text=include_text,
-        max_chars=max_chars,
+        max_chars=TRANSCRIPT_TOOL_MAX_CHARS,
     )
     payload["raw_data"] = data if include_text and not payload["content_truncated_by_tool"] else None
     payload["audit_note"] = (
         "Mark full_call_text_read and qna_reviewed yes only after the agent actually reads returned prepared remarks and Q&A. "
-        "If content_truncated_by_tool is true, call again with section='prepared_remarks' and section='qna', or increase max_chars."
+        "If content_truncated_by_tool is true, the transcript exceeds the server-side payload limit and must not be treated as fully reviewed."
     )
     return payload
 
