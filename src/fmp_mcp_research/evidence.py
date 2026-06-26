@@ -4,7 +4,6 @@ import re
 from datetime import date
 from typing import Any, Literal
 
-
 TranscriptSection = Literal["full", "prepared_remarks", "qna", "metadata"]
 
 QA_START_MARKERS = re.compile(
