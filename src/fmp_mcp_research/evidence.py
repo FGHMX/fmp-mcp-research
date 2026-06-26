@@ -20,8 +20,14 @@ QA_START_MARKERS = re.compile(
     r"q&a session\s*$|"
     r"operator:\s*(we will now begin|we will now open|at this time we will conduct|we are now ready to begin).*question|"
     r"operator:\s*our first question|"
+    r"operator:\s*\[operator instructions\].*?(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
+    r"operator:\s*(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
+    r"operator:\s*ladies and gentlemen.*?(we take|we will take|we'll take).*?(first|next|last)?\s*question|"
     r"our first question comes from|"
-    r"first question comes from"
+    r"first question comes from|"
+    r"we take the first question|"
+    r"we take the next question|"
+    r"we take the last question"
     r")",
     re.I | re.M,
 )
@@ -184,7 +190,7 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
     operator_intro_detected = bool(OPERATOR_MARKER.search(full_text))
     operator_qna_start_detected = bool(QA_START_MARKERS.search(qna)) if qna else False
     operator_close_detected = bool(CLOSING_MARKERS.search(full_text))
-    explicit_truncation_marker_detected = bool(TRUNCATION_MARKERS.search(full_text))
+    explicit_truncation_marker_detected = has_real_explicit_truncation_marker(full_text)
     section_detection_warning = sections.get("section_detection_warning")
     qna_mention_detected = bool(QA_MENTION_MARKERS.search(full_text))
     prepared_remarks_available = bool(prepared.strip())
@@ -230,6 +236,7 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
         "operator_qna_start_detected": operator_qna_start_detected,
         "operator_close_detected": operator_close_detected,
         "explicit_truncation_marker_detected": explicit_truncation_marker_detected,
+        "ends_mid_sentence": transcript_ends_mid_sentence(full_text),
         "section_detection_warning": section_detection_warning,
         "qna_mention_detected": qna_mention_detected,
         "likely_truncated_or_incomplete": not likely_complete,
@@ -320,6 +327,164 @@ def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
     }
 
 
+def transcript_ends_mid_sentence(full_text: str) -> bool:
+    """Detect an abrupt transcript ending.
+
+    This is intentionally conservative. A transcript should not be marked
+    incomplete just because Q&A was not detected. But if it ends in an
+    obvious unfinished sentence, that is strong evidence of source truncation.
+    """
+    if not full_text:
+        return False
+
+    tail = full_text.strip()[-300:].strip()
+    if not tail:
+        return False
+
+    unfinished_endings = (
+        "let me now take you through",
+        "let me take you through",
+        "i will now take you through",
+        "i'll now take you through",
+        "turn the call",
+        "turn it over",
+        "with that,",
+        "moving to",
+        "starting with",
+    )
+
+    lower_tail = tail.lower().rstrip(".!?\"'”’)]}")
+    if any(lower_tail.endswith(x) for x in unfinished_endings):
+        return True
+
+    # If the transcript does not end with sentence punctuation or a normal
+    # operator close, treat it as suspicious, but only as one signal.
+    if not re.search(r'[.!?]"?$|disconnect your lines\.?$|conclude.*call\.?$', tail, re.I):
+        return True
+
+    return False
+
+
+def has_real_explicit_truncation_marker(full_text: str) -> bool:
+    """Detect real truncation markers.
+
+    Do not treat [indiscernible] as truncation. That only means one phrase
+    could not be transcribed, not that the whole transcript is incomplete.
+    """
+    if not full_text:
+        return False
+
+    real_markers = re.compile(
+        r"("
+        r"\[truncated\]|"
+        r"\(truncated\)|"
+        r"\.\.\.\s*$|"
+        r"continued on next page|"
+        r"transcript ends|"
+        r"audio ends|"
+        r"call ends abruptly"
+        r")",
+        re.I,
+    )
+    return bool(real_markers.search(full_text))
+
+
+def build_transcript_quality_status(
+    *,
+    has_text: bool,
+    word_count: int,
+    transcript_available: bool,
+    content_truncated_by_tool: bool,
+    content_truncated_by_pack: bool,
+    operator_close_detected: bool,
+    qna_available: bool,
+    explicit_truncation_marker_detected: bool,
+    ends_mid_sentence: bool,
+) -> dict[str, object]:
+    """Return softer transcript status, detail, confidence and warnings.
+
+    Q&A detection failures should be warnings, not automatic incomplete status.
+    """
+    warnings: list[str] = []
+
+    if not has_text:
+        warnings.append("empty_transcript")
+
+    if content_truncated_by_tool:
+        warnings.append("content_truncated_by_tool")
+
+    if content_truncated_by_pack:
+        warnings.append("content_truncated_by_pack")
+
+    if explicit_truncation_marker_detected:
+        warnings.append("explicit_truncation_marker_detected")
+
+    if not operator_close_detected:
+        warnings.append("operator_close_not_detected")
+
+    if not qna_available:
+        warnings.append("qna_section_split_uncertain")
+
+    if ends_mid_sentence:
+        warnings.append("ends_mid_sentence")
+
+    if word_count < 2500:
+        warnings.append("too_short_for_typical_full_earnings_call")
+
+    if not transcript_available:
+        return {
+            "status": "missing",
+            "detail": "missing",
+            "confidence": "low",
+            "quality_warnings": warnings,
+        }
+
+    strong_incomplete_evidence = (
+        not has_text
+        or content_truncated_by_tool
+        or content_truncated_by_pack
+        or explicit_truncation_marker_detected
+        or ends_mid_sentence
+        or (
+            word_count < 2500
+            and not operator_close_detected
+            and not qna_available
+        )
+        or (
+            not operator_close_detected
+            and ends_mid_sentence
+        )
+    )
+
+    if strong_incomplete_evidence:
+        return {
+            "status": "incomplete",
+            "detail": (
+                "tool_truncated"
+                if content_truncated_by_tool or content_truncated_by_pack
+                else "source_incomplete"
+            ),
+            "confidence": "low",
+            "quality_warnings": warnings,
+        }
+
+    # Complete, but confidence may be medium if section split is uncertain.
+    if not operator_close_detected or not qna_available:
+        return {
+            "status": "complete",
+            "detail": "complete_with_warnings",
+            "confidence": "medium",
+            "quality_warnings": warnings,
+        }
+
+    return {
+        "status": "complete",
+        "detail": "complete",
+        "confidence": "high",
+        "quality_warnings": warnings,
+    }
+
+
 def build_transcript_payload(
     symbol: str,
     year: int,
@@ -353,21 +518,26 @@ def build_transcript_payload(
     returned_complete = bool(include_full_text and not content_truncated_by_tool and selected_text)
     qna_included = section in {"full", "qna"} and bool(sections["qna"]) and not (section == "full" and content_truncated_by_tool and len(returned_text) < (sections["qna_start_offset"] or 10**12))
 
-    if not transcript_available:
-        status = "missing"
-        status_detail = "missing"
-    elif content_truncated_by_tool:
-        status = "incomplete"
-        status_detail = "tool_truncated"
-    elif not source_complete:
-        status = "incomplete"
-        status_detail = "source_incomplete"
-    elif not returned_complete:
-        status = "incomplete"
-        status_detail = "not_fully_returned_in_payload"
-    else:
-        status = "complete"
-        status_detail = "complete"
+    content_truncated_by_pack = False
+
+    quality_status = build_transcript_quality_status(
+        has_text=bool(completeness.get("has_text")),
+        word_count=int(completeness.get("word_count") or 0),
+        transcript_available=transcript_available,
+        content_truncated_by_tool=content_truncated_by_tool,
+        content_truncated_by_pack=content_truncated_by_pack,
+        operator_close_detected=bool(completeness.get("operator_close_detected")),
+        qna_available=bool(completeness.get("qna_available")),
+        explicit_truncation_marker_detected=bool(
+            completeness.get("explicit_truncation_marker_detected")
+        ),
+        ends_mid_sentence=bool(completeness.get("ends_mid_sentence")),
+    )
+
+    status = str(quality_status["status"])
+    status_detail = str(quality_status["detail"])
+    transcript_confidence = str(quality_status["confidence"])
+    quality_warnings = list(quality_status["quality_warnings"])
 
     record = {
         "symbol": symbol.upper(),
@@ -379,6 +549,8 @@ def build_transcript_payload(
         "transcript_available": transcript_available,
         "transcript_status": status,
         "transcript_status_detail": status_detail,
+        "transcript_confidence": transcript_confidence,
+        "quality_warnings": quality_warnings,
         "section_returned": section,
         "full_transcript_included_in_payload": section == "full" and returned_complete,
         "included_content_is_excerpt": bool(selected_text) and not returned_complete,
