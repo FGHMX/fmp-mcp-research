@@ -9,6 +9,37 @@ from .report_contract import REQUIRED_SOURCE_FLAGS, REPORT_OUTPUT_SECTIONS
 
 TranscriptSection = Literal["full", "prepared_remarks", "qna", "metadata"]
 
+
+# Strict Q&A start markers.
+# Do not treat introductory phrases such as
+# "a question-and-answer session will follow" as the actual Q&A start.
+QA_START_MARKERS = re.compile(
+    r"("
+    r"question-and-answer session\s*$|"
+    r"questions and answers\s*$|"
+    r"q&a session\s*$|"
+    r"operator:\s*(we will now begin|we will now open|at this time we will conduct|we are now ready to begin).*question|"
+    r"operator:\s*our first question|"
+    r"our first question comes from|"
+    r"first question comes from"
+    r")",
+    re.I | re.M,
+)
+
+QA_MENTION_MARKERS = re.compile(
+    r"(question-and-answer|question and answer|questions and answers|q&a)",
+    re.I,
+)
+
+FALSE_QA_INTRO_MARKERS = re.compile(
+    r"("
+    r"question-and-answer session will follow|"
+    r"q&a session will follow|"
+    r"questions? and answers? session will follow"
+    r")",
+    re.I,
+)
+
 QA_MARKERS = re.compile(
     r"(question-and-answer|question and answer|questions and answers|q&a|operator instructions|we will now begin the question|first question)",
     re.I,
@@ -70,7 +101,7 @@ def transcript_has_qna(transcript_item: dict[str, Any]) -> bool:
 
 def split_transcript_sections(full_text: str) -> dict[str, Any]:
     """Heuristically split a transcript into prepared remarks and Q&A."""
-    match = QA_MARKERS.search(full_text)
+    match = QA_START_MARKERS.search(full_text)
     if not full_text:
         return {"prepared_remarks": "", "qna": "", "qna_start_offset": None}
     if not match:
@@ -116,9 +147,9 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
     prepared_word_count = len(prepared.split())
 
     has_text = char_count > 0
-    qna_detected = bool(QA_MARKERS.search(full_text))
+    qna_detected = bool(QA_START_MARKERS.search(full_text))
     operator_intro_detected = bool(OPERATOR_MARKER.search(full_text))
-    operator_qna_start_detected = bool(QA_MARKERS.search(qna)) if qna else False
+    operator_qna_start_detected = bool(QA_START_MARKERS.search(qna)) if qna else False
     operator_close_detected = bool(CLOSING_MARKERS.search(full_text))
     explicit_truncation_marker_detected = bool(TRUNCATION_MARKERS.search(full_text))
     prepared_remarks_available = bool(prepared.strip())
@@ -160,6 +191,8 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
         "operator_qna_start_detected": operator_qna_start_detected,
         "operator_close_detected": operator_close_detected,
         "explicit_truncation_marker_detected": explicit_truncation_marker_detected,
+        "section_detection_warning": sections.get("section_detection_warning"),
+        "qna_mention_detected": bool(QA_MENTION_MARKERS.search(full_text)),
         "likely_truncated_or_incomplete": not likely_complete,
         "truncation_reasons": truncation_reasons,
         "qna_validation": {
@@ -294,6 +327,7 @@ def build_transcript_payload(
         "call_exists": True,
         "transcript_available": transcript_available,
         "transcript_status": status,
+        "transcript_status_detail": status_detail,
         "section_returned": section,
         "full_transcript_included_in_payload": section == "full" and returned_complete,
         "included_content_is_excerpt": bool(selected_text) and not returned_complete,
