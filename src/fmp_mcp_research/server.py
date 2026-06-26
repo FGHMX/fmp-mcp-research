@@ -86,7 +86,7 @@ async def fmp_get_earnings_call_transcript(
     a server-side character budget so the model cannot choose partial evidence.
     """
 
-    data = await _get_client().get_earning_call_transcript(symbol=symbol, year=year, quarter=quarter)
+    data = await FMPClient().get_earning_call_transcript(symbol=symbol, year=year, quarter=quarter)
     payload = pack_transcript_response(
         raw=data,
         section="full",
