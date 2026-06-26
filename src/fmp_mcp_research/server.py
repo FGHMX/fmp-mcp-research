@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from dotenv import load_dotenv
@@ -17,7 +18,13 @@ from .report_contract import (
 
 load_dotenv()
 
-mcp = FastMCP("FMP Buy-Side Research", stateless_http=True, json_response=True)
+mcp = FastMCP(
+    "FMP Buy-Side Research",
+    stateless_http=True,
+    json_response=True,
+    host="0.0.0.0",
+    port=int(os.getenv("PORT", "8000")),
+)
 
 
 @mcp.tool()
