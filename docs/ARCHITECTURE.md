@@ -1,54 +1,97 @@
 # Architecture
 
-## Components
+## Goal
+
+The MCP server is a read-only evidence orchestration layer for LLM-driven buy-side research reports. It is optimized for prompts that require full earnings-call review, Q&A review, official releases, financial tables, quarter-by-quarter source audits, and conservative scoring readiness.
+
+## High-level flow
 
 ```text
-ChatGPT / MCP client
-        |
-        | HTTPS Streamable HTTP MCP
-        v
-FMP MCP Research Server
-        |
-        | Server-side FMP_API_KEY
-        v
+LLM / ChatGPT
+  ↓ MCP tool calls
+FastMCP server
+  ↓
+FMPClient
+  ↓
 Financial Modeling Prep API
 ```
 
-## Data flow for the AONC-style report
+## Design principle
 
-1. Agent asks for report contract.
-2. Agent requests an evidence pack for the ticker.
-3. Server selects the two most recent transcript periods from 2025 or later.
-4. Server fetches transcripts, tables and SEC filing index.
-5. Agent reads the returned content and performs the audit.
-6. Agent scores only after all required evidence flags are completed.
+The MCP separates these states explicitly:
 
-## Why not a single `generate_report` tool?
+1. A source exists.
+2. A source is available to fetch.
+3. A source was returned in the payload.
+4. A source was returned completely.
+5. The LLM/agent has read the returned source.
+6. Scoring is mechanically allowed.
 
-The report specification requires explicit proof of source review. If the MCP server returns a finished report, it becomes harder to prove the agent actually read the transcript/Q&A and official financial tables. This design makes source coverage observable.
+The MCP can verify states 1-4 mechanically. It cannot know whether the LLM truly read a document, so the audit fields use `unknown_agent_must_confirm` where appropriate.
 
-## Cloud options
+## Tool roles
 
-| Option | Best for | Notes |
-|---|---|---|
-| Google Cloud Run | Default recommendation | Lowest ops, HTTPS by default, container deploy. |
-| Fly.io | Fast small deployments | Good for prototypes; simpler than AWS. |
-| AWS ECS/Fargate | Enterprise AWS shops | More setup, better if VPC, WAF, CloudWatch, IAM standards are already in place. |
-| Local + Secure MCP Tunnel | Development/private testing | ChatGPT does not connect directly to local MCP servers; use a secure tunnel when supported. |
+### Discovery
 
-## Tool naming convention
+`fmp_list_transcript_dates` selects recent available calls from `min_year` onward and returns a recommended fetch action for each selected period.
 
-Use prefix `fmp_` for data-access tools and `research_` for process/contract tools.
+### Canonical transcript fetch
 
-- Verb first: `get`, `list`, `search`, `build`.
-- Avoid ambiguous names like `analyze_company` or `make_report`.
-- Make every tool read-only.
+`fmp_get_earnings_call_transcript` is the canonical source for transcript text. It returns:
 
-## Production hardening
+- requested section: `full`, `prepared_remarks`, `qna`, or `metadata`
+- completeness metadata
+- Q&A metadata
+- operator start / close detection
+- tool-side truncation flags
+- next best action if payload is incomplete or truncated
 
-- Add authentication in front of the MCP endpoint.
-- Add IP allowlists where possible.
-- Add structured logs for source audit fields.
-- Add cache with short TTL for transcripts and financial statements.
-- Add retry/backoff and rate-limit handling.
-- Add fallback scraper only for approved transcript sites if FMP transcript is absent.
+### Evidence pack
+
+`fmp_build_research_evidence_pack` is a manifest/orchestrator. It returns:
+
+- selected transcript periods
+- transcript status per period
+- evidence manifest
+- financial table matching status
+- prioritized SEC filings
+- quarter-by-quarter audit template
+- scoring readiness and blocking items
+- next actions
+
+It does not certify that an LLM has read full transcripts.
+
+### Validation
+
+`fmp_validate_research_evidence` checks an evidence-pack payload for follow-up requirements. It is a mechanical validator, not an analyst judgment engine.
+
+## Transcript completeness logic
+
+The server uses heuristic checks:
+
+- minimum word count for full-call plausibility
+- Q&A start markers
+- Q&A length
+- operator close markers
+- explicit truncation markers
+- prepared remarks and Q&A section splitting
+
+These checks are conservative and intentionally favor follow-up fetching when evidence is ambiguous.
+
+## Strict report workflow behavior
+
+When `strict_report_workflow=true`, the evidence pack avoids silent fallbacks. If financial tables do not match the selected periods exactly, the payload marks `no_exact_period_match` rather than pretending the latest rows are reviewed.
+
+The evidence pack also sets `score_allowed_now=false` unless required transcript, Q&A, release and table review can be verified through the workflow.
+
+## Why this prevents LLM errors
+
+The prior design could return transcript flags that looked positive while the visible payload was truncated. Under a strict prompt, an LLM could incorrectly delete a company from the run or incorrectly score it.
+
+The new design gives the LLM explicit operational states:
+
+- transcript exists but not returned in full
+- Q&A detected but not included
+- source may be complete, but payload is partial
+- use `fmp_get_earnings_call_transcript` next
+- do not score until blocking items are cleared

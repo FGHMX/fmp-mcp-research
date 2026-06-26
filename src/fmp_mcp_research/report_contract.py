@@ -3,6 +3,7 @@ REPORT_OUTPUT_SECTIONS = [
     "Source audit and quarter-by-quarter coverage audit",
     "Comparability assessment",
     "Financial baseline + Financial Reality",
+    "Reporting credibility check",
     "Earnings call roadmap",
     "Financial Alignment",
     "Catalysts / anti-catalysts",
@@ -51,4 +52,35 @@ PHARMA_LENSES = [
     "competitive_lifecycle_durability",
     "pipeline_label_expansion_quality",
     "portfolio_cash_conversion_quality",
+]
+
+HEALTHCARE_TECH_LENSES = [
+    "monetization_quality",
+    "healthcare_workflow_embeddedness",
+    "stakeholder_economics_revenue_durability",
+    "data_automation_product_defensibility",
+    "margin_cac_cash_conversion_quality",
+]
+
+EVIDENCE_READINESS_STATES = [
+    "source_not_found",
+    "source_available_not_returned",
+    "source_returned_partial_or_truncated",
+    "source_returned_complete_agent_must_read",
+    "agent_review_confirmed_outside_mcp",
+]
+
+TRANSCRIPT_COMPLETENESS_FIELDS = [
+    "call_exists",
+    "transcript_available",
+    "full_transcript_included_in_payload",
+    "included_content_is_excerpt",
+    "content_truncated_by_tool",
+    "qna_detected_in_source",
+    "qna_included_in_payload",
+    "qna_complete",
+    "operator_qna_start_detected",
+    "operator_close_detected",
+    "must_call_dedicated_transcript_tool",
+    "score_allowed_from_current_payload",
 ]
