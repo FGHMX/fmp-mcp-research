@@ -78,29 +78,26 @@ async def fmp_get_earnings_call_transcript(
     symbol: str,
     year: int,
     quarter: int,
-    section: TranscriptSection = "full",
-    include_text: bool = True,
 ) -> dict[str, Any]:
-    """Canonical fetch for one earnings-call transcript with completeness/Q&A/truncation metadata.
+    """Canonical fetch for one complete earnings-call transcript.
 
-    Use this tool for every selected period before a strict research report scorecard. It separates source availability,
-    payload completeness, Q&A detection, and tool-side truncation so the LLM does not confuse a partial payload with a
-    missing source.
+    The public MCP input intentionally exposes only symbol/year/quarter.
+    The server always requests the full transcript text from FMP and applies
+    a server-side character budget so the model cannot choose partial evidence.
     """
-    data = await FMPClient().transcript(symbol, year, quarter)
-    payload = build_transcript_payload(
-        symbol=symbol,
-        year=year,
-        quarter=quarter,
+
+    data = await _get_client().get_earning_call_transcript(symbol=symbol, year=year, quarter=quarter)
+    payload = pack_transcript_response(
         raw=data,
-        section=section,
-        include_full_text=include_text,
+        section="full",
+        include_full_text=True,
         max_chars=TRANSCRIPT_TOOL_MAX_CHARS,
     )
-    payload["raw_data"] = data if include_text and not payload["content_truncated_by_tool"] else None
+    payload["raw_data"] = data if not payload["content_truncated_by_tool"] else None
     payload["audit_note"] = (
-        "Mark full_call_text_read and qna_reviewed yes only after the agent actually reads returned prepared remarks and Q&A. "
-        "If content_truncated_by_tool is true, the transcript exceeds the server-side payload limit and must not be treated as fully reviewed."
+        "The model requested only symbol/year/quarter. The server fetched the full earnings-call transcript. "
+        "Mark full_call_text_read and qna_reviewed yes only after the agent actually reads the returned prepared remarks and Q&A. "
+        "If content_truncated_by_tool is true, the transcript exceeds the server-side payload limit and must not be treated as fully reviewed from this payload."
     )
     return payload
 
