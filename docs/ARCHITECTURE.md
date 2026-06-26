@@ -53,9 +53,11 @@ The MCP can verify states 1-4 mechanically. It cannot know whether the LLM truly
 - selected transcript periods
 - transcript status per period
 - evidence manifest
-- financial table matching status
+- financial table matching status for selected quarters
+- annual financial table matching status for the latest completed fiscal year
 - prioritized SEC filings
-- quarter-by-quarter audit template
+- quarter-by-quarter source audit template
+- financial statement audit template for annual and selected-quarter review
 - scoring readiness and blocking items
 - next actions
 
@@ -82,7 +84,9 @@ These checks are conservative and intentionally favor follow-up fetching when ev
 
 When `strict_report_workflow=true`, the evidence pack avoids silent fallbacks. If financial tables do not match the selected periods exactly, the payload marks `no_exact_period_match` rather than pretending the latest rows are reviewed.
 
-The evidence pack also sets `score_allowed_now=false` unless required transcript, Q&A, release and table review can be verified through the workflow.
+The evidence pack now separates primary statement review from secondary metrics. Income Statement, Balance Sheet and Cash Flow Statement are required for the latest completed fiscal year and every selected quarter. Key metrics, ratios and financial growth are supporting context only.
+
+The evidence pack also sets scoring blockers unless required transcript, Q&A, release and statement-table review can be verified through the workflow.
 
 ## Why this prevents LLM errors
 

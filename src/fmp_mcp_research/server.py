@@ -103,7 +103,7 @@ async def fmp_get_earnings_call_transcript(
 async def fmp_get_statement_tables(
     symbol: str, period: Literal["quarter", "annual"] = "quarter", limit: int = 8
 ) -> dict[str, Any]:
-    """Fetch income statement, balance sheet, cash flow, key metrics, ratios and growth tables."""
+    """Fetch statement tables. Use period='annual' for latest completed fiscal year review and period='quarter' for selected-quarter review."""
     client = FMPClient()
     return {
         "symbol": symbol.upper(),
@@ -114,7 +114,15 @@ async def fmp_get_statement_tables(
         "key_metrics": await client.key_metrics(symbol, period, limit),
         "ratios": await client.ratios(symbol, period, limit),
         "financial_growth": await client.financial_growth(symbol, period, limit),
-        "audit_note": "These are FMP financial tables. They do not replace official earnings releases or filings when the report requires them.",
+        "primary_statements_for_required_review": [
+            "income_statement",
+            "balance_sheet",
+            "cash_flow_statement",
+        ],
+        "audit_note": (
+            "Use income_statement, balance_sheet and cash_flow_statement for required financial-statement review. "
+            "Use key_metrics, ratios and financial_growth as supporting context only. These FMP financial tables do not replace official earnings releases or filings when the report requires them."
+        ),
     }
 
 

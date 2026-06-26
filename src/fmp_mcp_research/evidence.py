@@ -4,6 +4,8 @@ import re
 from datetime import date
 from typing import Any, Literal
 
+from .report_contract import REQUIRED_SOURCE_FLAGS
+
 TranscriptSection = Literal["full", "prepared_remarks", "qna", "metadata"]
 
 QA_START_MARKERS = re.compile(
@@ -242,6 +244,119 @@ def financial_table_record(name: str, rows: Any, periods: list[dict[str, Any]], 
     }
 
 
+def filter_by_fiscal_year(rows: Any, fiscal_year: int | None) -> list[dict[str, Any]]:
+    if fiscal_year is None:
+        return []
+    output = []
+    for row in _safe_list(rows):
+        year_i = _safe_int(row.get("calendarYear") or row.get("year") or row.get("fiscalYear"))
+        if year_i == fiscal_year:
+            output.append(row)
+    return output
+
+
+def annual_financial_table_record(name: str, rows: Any, fiscal_year: int | None) -> dict[str, Any]:
+    all_rows = _safe_list(rows)
+    matched = filter_by_fiscal_year(all_rows, fiscal_year)
+    return {
+        "table_name": name,
+        "fiscal_year": fiscal_year,
+        "matched_rows": matched,
+        "match_status": "exact_fiscal_year_match" if matched else "no_exact_fiscal_year_match",
+        "fallback_rows": [],
+        "fallback_used": False,
+        "audit_note": (
+            f"Exact annual row matched for FY{fiscal_year}."
+            if matched
+            else "No exact annual fiscal-year match; fetch annual statement tables and verify manually before scoring."
+        ),
+    }
+
+
+def latest_completed_fiscal_year(periods: list[dict[str, Any]]) -> int | None:
+    if not periods:
+        return None
+    latest = max(periods, key=lambda p: (int(p["year"]), int(p["quarter"])))
+    year = int(latest["year"])
+    quarter = int(latest["quarter"])
+    return year if quarter == 4 else year - 1
+
+
+def financial_statement_review_actions(symbol: str, selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    symbol = symbol.upper()
+    actions: list[dict[str, Any]] = []
+    statements_to_review = ["income_statement", "balance_sheet", "cash_flow_statement"]
+    latest_full_year = latest_completed_fiscal_year(selected_periods)
+
+    if latest_full_year is not None:
+        actions.append({
+            "tool": "fmp_get_statement_tables",
+            "arguments": {"symbol": symbol, "period": "annual", "limit": 3},
+            "reason": (
+                "Review Income Statement, Balance Sheet and Cash Flow Statement "
+                f"for the latest completed fiscal year FY{latest_full_year} before scoring."
+            ),
+            "required_for_scoring": True,
+            "review_scope": "latest_completed_fiscal_year",
+            "fiscal_year_to_review": latest_full_year,
+            "statements_to_review": statements_to_review,
+        })
+
+    if selected_periods:
+        actions.append({
+            "tool": "fmp_get_statement_tables",
+            "arguments": {"symbol": symbol, "period": "quarter", "limit": max(len(selected_periods), 8)},
+            "reason": (
+                "Review Income Statement, Balance Sheet and Cash Flow Statement "
+                "for each selected quarter before scoring."
+            ),
+            "required_for_scoring": True,
+            "review_scope": "selected_quarters",
+            "periods_to_review": [p["period_label"] for p in selected_periods],
+            "statements_to_review": statements_to_review,
+        })
+
+    return actions
+
+
+def build_source_audit_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "period_label": p["period_label"],
+            "full_call_text_read": "no",
+            "qna_reviewed": "no",
+            "official_release_reviewed": "no",
+            "financial_tables_reviewed": "no",
+        }
+        for p in selected_periods
+    ]
+
+
+def build_financial_statement_audit_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    audit_rows: list[dict[str, Any]] = []
+    latest_full_year = latest_completed_fiscal_year(selected_periods)
+
+    if latest_full_year is not None:
+        audit_rows.append({
+            "period_label": f"FY{latest_full_year}",
+            "review_scope": "latest_completed_fiscal_year",
+            "income_statement_reviewed": "no",
+            "balance_sheet_reviewed": "no",
+            "cash_flow_statement_reviewed": "no",
+        })
+
+    for p in selected_periods:
+        audit_rows.append({
+            "period_label": p["period_label"],
+            "review_scope": "selected_quarter",
+            "income_statement_reviewed": "no",
+            "balance_sheet_reviewed": "no",
+            "cash_flow_statement_reviewed": "no",
+        })
+
+    return audit_rows
+
+
 def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
     relevant_forms = {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}
     rows = _safe_list(filings)
@@ -256,10 +371,16 @@ def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
         if form_of(row) in {"8-K", "6-K"}
         and re.search(r"earnings|results|release|exhibit|ex-99|exhibit 99", str(row), re.I)
     ]
+    relevant_limited = prioritized[:12]
+    earnings_limited = earnings_like[:6]
     return {
-        "relevant_filings_for_report": prioritized,
-        "earnings_release_candidates": earnings_like,
-        "all_filings": rows,
+        "relevant_filings_for_report": relevant_limited,
+        "earnings_release_candidates": earnings_limited,
+        "omitted_filings_count": max(0, len(rows) - len(relevant_limited)),
+        "omitted_filings_note": (
+            "Non-core filings such as Form 4, SC 13G, S-8, proxies, and shelf/prospectus "
+            "documents are omitted from the default evidence pack unless specifically relevant."
+        ),
         "audit_note": "Prioritize 8-K/6-K earnings-release exhibits, then 10-Q/10-K. Ignore Form 4/144/13G unless specifically relevant.",
     }
 
@@ -337,9 +458,18 @@ async def build_evidence_pack(
     from .fmp_client import FMPClient
 
     client = FMPClient()
+    symbol_upper = symbol.upper()
+
     transcript_dates = await client.transcript_dates(symbol)
     selected_periods = normalize_transcript_dates(transcript_dates, min_year=min_year, max_items=requested_calls)
-    income, balance, cash, metrics, ratios, growth = await _fetch_financials(client, symbol, requested_calls)
+    latest_full_year = latest_completed_fiscal_year(selected_periods)
+
+    quarter_income, quarter_balance, quarter_cash, metrics, ratios, growth = await _fetch_financials(
+        client, symbol, requested_calls, period="quarter"
+    )
+    annual_income, annual_balance, annual_cash, _, _, _ = await _fetch_financials(
+        client, symbol, 3, period="annual"
+    )
     filings = await client.sec_filings(symbol, from_date=f"{min_year}-01-01", to_date=date.today().isoformat())
 
     transcript_statuses = []
@@ -347,6 +477,7 @@ async def build_evidence_pack(
         transcript_statuses.append({
             "year": period["year"],
             "quarter": period["quarter"],
+            "period_label": period["period_label"],
             "transcript_available": True,
             "full_call_text_included": include_transcript_text,
             "full_call_text_read_by_agent": False,
@@ -354,48 +485,64 @@ async def build_evidence_pack(
         })
 
     financial_tables = [
-        financial_table_record("income_statement", income, selected_periods),
-        financial_table_record("balance_sheet", balance, selected_periods),
-        financial_table_record("cash_flow_statement", cash, selected_periods),
+        financial_table_record("income_statement", quarter_income, selected_periods),
+        financial_table_record("balance_sheet", quarter_balance, selected_periods),
+        financial_table_record("cash_flow_statement", quarter_cash, selected_periods),
         financial_table_record("key_metrics", metrics, selected_periods),
         financial_table_record("ratios", ratios, selected_periods),
         financial_table_record("financial_growth", growth, selected_periods),
     ]
+    annual_financial_tables = [
+        annual_financial_table_record("income_statement", annual_income, latest_full_year),
+        annual_financial_table_record("balance_sheet", annual_balance, latest_full_year),
+        annual_financial_table_record("cash_flow_statement", annual_cash, latest_full_year),
+    ]
+
     blocking_items = []
     if len(selected_periods) < requested_calls:
         blocking_items.append("fewer_transcript_periods_found_than_requested")
     if strict_report_workflow:
         blocking_items.append("agent_must_fetch_and_read_each_selected_transcript_before_scoring")
         blocking_items.append("agent_must_review_official_release_or_relevant_filing_before_scoring")
+        blocking_items.append("agent_must_review_statement_tables_for_latest_completed_fiscal_year_and_selected_quarters_before_scoring")
+
+    transcript_actions = [
+        {
+            "tool": "fmp_get_earnings_call_transcript",
+            "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"], "section": "full"},
+            "reason": "Fetch and read the full transcript before scoring.",
+            "required_for_scoring": True,
+            "review_scope": "selected_quarter_transcript",
+            "period_label": p["period_label"],
+        }
+        for p in selected_periods
+    ]
+    statement_actions = financial_statement_review_actions(symbol_upper, selected_periods)
 
     return {
         "evidence_pack_version": "0.3.0",
-        "symbol": symbol.upper(),
+        "symbol": symbol_upper,
         "selected_periods": selected_periods,
+        "latest_completed_fiscal_year": latest_full_year,
         "evidence_manifest": {
             "transcripts": transcript_statuses,
             "financial_tables": financial_tables,
+            "annual_financial_tables": annual_financial_tables,
             "sec_filings": prioritize_sec_filings(filings),
         },
-        "source_audit_template": [{"period_label": p["period_label"], "full_call_text_read": "no", "qna_reviewed": "no", "official_release_reviewed": "no", "financial_tables_reviewed": "no"} for p in selected_periods],
+        "source_audit_template": build_source_audit_template(selected_periods),
+        "required_source_flags": REQUIRED_SOURCE_FLAGS,
+        "financial_statement_audit_template": build_financial_statement_audit_template(selected_periods),
         "scoring_readiness": {
             "allowed": not strict_report_workflow and not blocking_items,
             "blocking_items": blocking_items,
             "strict_report_workflow": strict_report_workflow,
         },
-        "recommended_next_actions": [
-            {
-                "tool": "fmp_get_earnings_call_transcript",
-                "arguments": {"symbol": symbol.upper(), "year": p["year"], "quarter": p["quarter"], "section": "full"},
-                "reason": "Fetch and read the full transcript before scoring.",
-            }
-            for p in selected_periods
-        ],
+        "recommended_next_actions": transcript_actions + statement_actions,
     }
 
 
-async def _fetch_financials(client: Any, symbol: str, limit: int) -> tuple[Any, Any, Any, Any, Any, Any]:
-    period = "quarter"
+async def _fetch_financials(client: Any, symbol: str, limit: int, period: Literal["quarter", "annual"] = "quarter") -> tuple[Any, Any, Any, Any, Any, Any]:
     return (
         await client.income_statement(symbol, period, limit),
         await client.balance_sheet(symbol, period, limit),
@@ -411,14 +558,29 @@ def validate_evidence_payload(evidence_pack: dict[str, Any]) -> dict[str, Any]:
     periods = evidence_pack.get("selected_periods") or []
     if not periods:
         blocking.append("no_selected_periods")
+
     audit_rows = evidence_pack.get("source_audit_template") or []
     for row in audit_rows:
+        period_label = row.get("period_label")
         if row.get("full_call_text_read") != "yes":
-            blocking.append(f"full_call_text_not_read:{row.get('period_label')}")
+            blocking.append(f"full_call_text_not_read:{period_label}")
         if row.get("qna_reviewed") != "yes":
-            blocking.append(f"qna_not_reviewed:{row.get('period_label')}")
+            blocking.append(f"qna_not_reviewed:{period_label}")
         if row.get("official_release_reviewed") != "yes":
-            blocking.append(f"official_release_not_reviewed:{row.get('period_label')}")
+            blocking.append(f"official_release_not_reviewed:{period_label}")
+        if row.get("financial_tables_reviewed") != "yes":
+            blocking.append(f"financial_tables_not_reviewed:{period_label}")
+
+    financial_audit_rows = evidence_pack.get("financial_statement_audit_template") or []
+    for row in financial_audit_rows:
+        period_label = row.get("period_label")
+        if row.get("income_statement_reviewed") != "yes":
+            blocking.append(f"income_statement_not_reviewed:{period_label}")
+        if row.get("balance_sheet_reviewed") != "yes":
+            blocking.append(f"balance_sheet_not_reviewed:{period_label}")
+        if row.get("cash_flow_statement_reviewed") != "yes":
+            blocking.append(f"cash_flow_statement_not_reviewed:{period_label}")
+
     return {
         "evidence_pack_version": evidence_pack.get("evidence_pack_version"),
         "allowed": not blocking,

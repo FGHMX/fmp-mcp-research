@@ -23,6 +23,11 @@ REQUIRED_SOURCE_FLAGS = [
     "official_release_candidate_found",
     "official_release_reviewed",
     "financial_tables_matched_to_period",
+    "financial_tables_reviewed",
+    "income_statement_reviewed",
+    "balance_sheet_reviewed",
+    "cash_flow_statement_reviewed",
+    "latest_completed_fiscal_year_reviewed",
     "scorecard_allowed",
 ]
 
@@ -81,9 +86,12 @@ def build_report_contract(sector: str = "healthcare_technology") -> dict[str, ob
         "workflow_contract": {
             "evidence_pack_is_orchestrator_not_final_review": True,
             "canonical_transcript_fetch_tool": "fmp_get_earnings_call_transcript",
+            "canonical_statement_tables_tool": "fmp_get_statement_tables",
             "must_fetch_transcript_for_each_selected_period": True,
             "must_read_prepared_remarks_and_qna_before_scoring": True,
             "must_review_official_release_and_financial_tables_separately": True,
+            "must_review_income_statement_balance_sheet_and_cash_flow": True,
+            "must_review_latest_completed_fiscal_year_and_selected_quarters": True,
             "qna_split_uncertain_is_warning_not_automatic_blocker": True,
         },
         "scoring_guardrail": (

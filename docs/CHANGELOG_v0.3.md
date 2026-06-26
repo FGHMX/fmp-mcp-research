@@ -31,3 +31,10 @@
 18. Run Docker as non-root user.
 19. Keep `.env.example` minimal and explicit.
 20. Document auth/rate-limiting as production guardrails without making the local dev setup too strict.
+
+## Required financial statement review
+
+- Evidence packs now recommend `fmp_get_statement_tables` for annual and quarterly statement review.
+- The required review scope covers Income Statement, Balance Sheet and Cash Flow Statement for the latest completed fiscal year and each selected quarter.
+- Added `financial_statement_audit_template` to keep statement-level review separate from the general source audit.
+- SEC filing prioritization now returns a concise default list and omits non-core filings from the evidence pack unless specifically relevant.

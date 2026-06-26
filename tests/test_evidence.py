@@ -2,7 +2,9 @@ from fmp_mcp_research.evidence import (
     assess_transcript_completeness,
     build_transcript_payload,
     filter_by_period,
+    financial_statement_review_actions,
     has_real_explicit_truncation_marker,
+    latest_completed_fiscal_year,
     normalize_transcript_dates,
     prioritize_sec_filings,
     split_transcript_sections,
@@ -98,3 +100,58 @@ def test_validate_evidence_payload_blocks_unread_sources():
     result = validate_evidence_payload(payload)
     assert result["allowed"] is False
     assert "full_call_text_not_read:Q1 2026" in result["blocking_items"]
+
+
+def test_latest_completed_fiscal_year_infers_prior_year_for_q1():
+    periods = [{"year": 2026, "quarter": 1, "period_label": "Q1 2026"}]
+    assert latest_completed_fiscal_year(periods) == 2025
+
+
+def test_financial_statement_review_actions_use_existing_statement_tables_tool():
+    periods = [
+        {"year": 2026, "quarter": 1, "period_label": "Q1 2026"},
+        {"year": 2025, "quarter": 4, "period_label": "Q4 2025"},
+    ]
+    actions = financial_statement_review_actions("RLMD", periods)
+    assert [action["tool"] for action in actions] == [
+        "fmp_get_statement_tables",
+        "fmp_get_statement_tables",
+    ]
+    assert actions[0]["arguments"]["period"] == "annual"
+    assert actions[0]["fiscal_year_to_review"] == 2025
+    assert actions[1]["arguments"]["period"] == "quarter"
+    assert actions[1]["periods_to_review"] == ["Q1 2026", "Q4 2025"]
+    assert actions[1]["statements_to_review"] == [
+        "income_statement",
+        "balance_sheet",
+        "cash_flow_statement",
+    ]
+
+
+def test_validate_evidence_payload_blocks_unreviewed_financial_statements():
+    payload = {
+        "evidence_pack_version": "0.3.0",
+        "selected_periods": [{"period_label": "Q1 2026"}],
+        "source_audit_template": [
+            {
+                "period_label": "Q1 2026",
+                "full_call_text_read": "yes",
+                "qna_reviewed": "yes",
+                "official_release_reviewed": "yes",
+                "financial_tables_reviewed": "yes",
+            }
+        ],
+        "financial_statement_audit_template": [
+            {
+                "period_label": "FY2025",
+                "income_statement_reviewed": "no",
+                "balance_sheet_reviewed": "yes",
+                "cash_flow_statement_reviewed": "yes",
+            }
+        ],
+        "scoring_readiness": {"blocking_items": []},
+        "recommended_next_actions": [],
+    }
+    result = validate_evidence_payload(payload)
+    assert result["allowed"] is False
+    assert "income_statement_not_reviewed:FY2025" in result["blocking_items"]

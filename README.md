@@ -15,6 +15,8 @@ The server does **not** generate final investment recommendations. It builds evi
 - Added CI skeleton for test/lint.
 - Reformatted the project into maintainable Python modules.
 - Hardened Docker by running as a non-root user.
+- Added explicit statement-table review actions for the latest completed fiscal year and selected quarters.
+- Reduced default SEC filing noise in evidence packs by omitting non-core filings unless specifically relevant.
 
 ## Tools exposed
 
@@ -39,8 +41,10 @@ The server does **not** generate final investment recommendations. It builds evi
 5. If `content_truncated_by_tool=true`, fetch `section="prepared_remarks"` and `section="qna"` separately.
 6. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after actually reading the returned text.
 7. Use `fmp_search_sec_filings` to locate official 8-K/6-K releases and 10-Q/10-K filings.
-8. Use `fmp_get_statement_tables` for financial tables and verify period matching.
-9. Complete the source audit before producing a scorecard.
+8. Use `fmp_get_statement_tables(period="annual")` to review Income Statement, Balance Sheet and Cash Flow Statement for the latest completed fiscal year.
+9. Use `fmp_get_statement_tables(period="quarter")` to review Income Statement, Balance Sheet and Cash Flow Statement for every selected quarter.
+10. Use key metrics, ratios and growth tables as supporting context, not as a substitute for primary statements.
+11. Complete both `source_audit_template` and `financial_statement_audit_template` before producing a scorecard.
 
 ## Local development
 
