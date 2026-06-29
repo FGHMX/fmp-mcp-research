@@ -1,0 +1,5 @@
+FMP_BASE_URL: "https://financialmodelingprep.com/stable"
+FMP_TIMEOUT_SECONDS: "30"
+FMP_MAX_LIMIT: "100"
+SEC_USER_AGENT: "fmp-mcp-research/0.3.3 Fredy.gallegos@lagunacapfund.com"
+SEC_TIMEOUT_SECONDS: "30"

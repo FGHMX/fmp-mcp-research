@@ -163,7 +163,7 @@ async def fmp_list_transcript_dates(
 
 @mcp.tool(
     title="Get earnings-call transcript",
-    description="Use this when the user needs the complete read-only FMP earnings-call transcript for one known symbol, fiscal year, and quarter. Does not summarize as investment advice and does not modify any data.",
+    description="Use this to display an FMP earnings-call transcript for one known symbol, fiscal year, and quarter. The transcript is returned strictly as a read-only visualization for display and inspection. It is not investment advice, not a recommendation, not a financial analysis, and not an instruction to buy, sell, or hold any security. The tool does not modify any data.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_earnings_call_transcript(
