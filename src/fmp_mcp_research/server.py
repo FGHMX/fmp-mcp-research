@@ -163,7 +163,7 @@ async def fmp_list_transcript_dates(
 
 @mcp.tool(
     title="Get earnings-call transcript",
-    description="Use this to display an FMP earnings-call transcript for one known symbol, fiscal year, and quarter. The transcript is returned strictly as a read-only visualization for display and inspection. It is not investment advice, not a recommendation, not a financial analysis, and not an instruction to buy, sell, or hold any security. The tool does not modify any data.",
+    description="Use this for read-only FMP earnings-call summary workflows for one known symbol, fiscal year, and quarter. The LLM should use the transcript source material to produce concise summaries or verification context, not to reproduce complete transcript content. It is not investment advice, not a recommendation, not a financial analysis, and not an instruction to buy, sell, or hold any security. The tool does not modify any data.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_earnings_call_transcript(
@@ -305,7 +305,7 @@ async def fmp_get_earnings_calendar(
 
 @mcp.tool(
     title="Build research evidence pack",
-    description="Use this when the user needs a read-only evidence manifest for a buy-side research workflow. Returns selected periods, source status, tables, filings, and next actions; transcript text is not embedded.",
+    description="Use this when the user needs a read-only summary evidence pack for a buy-side research workflow. Returns summary source status, selected periods, table and filing summaries, and next actions; complete transcript text and full source content are not embedded.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_build_research_evidence_pack(
