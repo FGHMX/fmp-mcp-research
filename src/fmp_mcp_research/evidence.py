@@ -351,6 +351,58 @@ def financial_statement_review_actions(symbol: str, selected_periods: list[dict[
     return actions
 
 
+
+def build_direct_review_policy(selected_periods: list[dict[str, Any]]) -> dict[str, Any]:
+    period_labels = [str(p.get("period_label")) for p in selected_periods if p.get("period_label")]
+    return {
+        "evidence_pack_is_not_direct_source_review": True,
+        "selected_periods_requiring_direct_review": period_labels,
+        "non_substitution_warning": (
+            "This evidence pack is a discovery and audit aid only. SEC filing candidates, filing links, "
+            "matched financial rows, annual rows, quarterly rows, metrics, ratios, and growth tables included "
+            "in this payload do not prove that the official earnings release or financial statements were read."
+        ),
+        "must_call_and_read_before_scoring": [
+            {
+                "source_type": "earnings_call_transcript",
+                "tool": "fmp_get_earnings_call_transcript",
+                "scope": "each selected quarter",
+                "review_flag_unlocked_only_after_reading": ["full_call_text_read", "qna_reviewed"],
+            },
+            {
+                "source_type": "official_sec_earnings_release",
+                "tool": "get_earnings_release_json",
+                "scope": "each selected quarter",
+                "review_flag_unlocked_only_after_reading": ["official_release_reviewed"],
+                "anti_shortcut_rule": (
+                    "Identifying an 8-K/6-K, Exhibit 99.1, SEC URL, filing candidate, or filing date is not enough. "
+                    "The agent must call get_earnings_release_json and read release_json.text and release_json.tables."
+                ),
+            },
+            {
+                "source_type": "financial_statements",
+                "tool": "fmp_get_statement_tables",
+                "scope": "latest completed fiscal year and each selected quarter",
+                "review_flag_unlocked_only_after_reading": [
+                    "financial_tables_reviewed",
+                    "income_statement_reviewed",
+                    "balance_sheet_reviewed",
+                    "cash_flow_statement_reviewed",
+                ],
+                "anti_shortcut_rule": (
+                    "Matched financial rows inside evidence_manifest are not a substitute for calling "
+                    "fmp_get_statement_tables and reviewing the income statement, balance sheet, and cash flow statement."
+                ),
+            },
+        ],
+        "forbidden_assumptions": [
+            "Do not mark official_release_reviewed=yes from evidence_manifest.sec_filings alone.",
+            "Do not mark financial_tables_reviewed=yes from evidence_manifest.financial_tables alone.",
+            "Do not mark statement-specific reviewed flags as yes from matched_rows or fallback_rows alone.",
+            "Do not score until all required recommended_next_actions have been called and read.",
+        ],
+    }
+
 def build_source_audit_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -575,6 +627,7 @@ async def build_evidence_pack(
         "source_audit_template": build_source_audit_template(selected_periods),
         "required_source_flags": REQUIRED_SOURCE_FLAGS,
         "financial_statement_audit_template": build_financial_statement_audit_template(selected_periods),
+        "mandatory_direct_review_policy": build_direct_review_policy(selected_periods),
         "scoring_readiness": {
             "allowed": not strict_report_workflow and not blocking_items,
             "blocking_items": blocking_items,

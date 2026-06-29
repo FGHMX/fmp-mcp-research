@@ -1,5 +1,6 @@
 from fmp_mcp_research.evidence import (
     assess_transcript_completeness,
+    build_direct_review_policy,
     build_transcript_payload,
     earnings_release_review_actions,
     filter_by_period,
@@ -178,3 +179,28 @@ def test_validate_evidence_payload_blocks_unreviewed_financial_statements():
     result = validate_evidence_payload(payload)
     assert result["allowed"] is False
     assert "income_statement_not_reviewed:FY2025" in result["blocking_items"]
+
+def test_direct_review_policy_says_manifest_does_not_substitute_sources():
+    periods = [
+        {"year": 2026, "quarter": 1, "period_label": "Q1 2026"},
+        {"year": 2025, "quarter": 4, "period_label": "Q4 2025"},
+    ]
+
+    policy = build_direct_review_policy(periods)
+
+    assert policy["evidence_pack_is_not_direct_source_review"] is True
+    assert policy["selected_periods_requiring_direct_review"] == ["Q1 2026", "Q4 2025"]
+    assert "do not prove" in policy["non_substitution_warning"]
+    assert "official earnings release" in policy["non_substitution_warning"]
+    assert "financial statements" in policy["non_substitution_warning"]
+
+    tools = {item["tool"] for item in policy["must_call_and_read_before_scoring"]}
+    assert "get_earnings_release_json" in tools
+    assert "fmp_get_statement_tables" in tools
+    assert "fmp_get_earnings_call_transcript" in tools
+
+    forbidden = " ".join(policy["forbidden_assumptions"])
+    assert "Do not mark official_release_reviewed=yes" in forbidden
+    assert "Do not mark financial_tables_reviewed=yes" in forbidden
+    assert "matched_rows" in forbidden
+
