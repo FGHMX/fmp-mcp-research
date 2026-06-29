@@ -52,3 +52,13 @@ def test_get_earnings_release_json_uses_requested_camel_case_inputs():
         "includeHtml",
         "includeTables",
     ]
+
+def test_date_pattern_accepts_real_iso_date():
+    import re
+
+    from fmp_mcp_research.server import DATE_PATTERN
+
+    assert re.fullmatch(DATE_PATTERN, "2026-04-29")
+    assert re.fullmatch(DATE_PATTERN, "2025-01-01")
+    assert not re.fullmatch(DATE_PATTERN, r"\d{4}-\d{2}-\d{2}")
+

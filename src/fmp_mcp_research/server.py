@@ -39,7 +39,7 @@ READ_ONLY_SAFE = ToolAnnotations(
 )
 
 SYMBOL_PATTERN = r"^[A-Za-z0-9.\\-]{1,12}$"
-DATE_PATTERN = r"^\\d{4}-\\d{2}-\\d{2}$"
+DATE_PATTERN = r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
 
 Symbol = Annotated[
     str,
