@@ -27,24 +27,23 @@ The MCP separates these states explicitly:
 5. The LLM/agent has read the returned source.
 6. Scoring is mechanically allowed.
 
-The MCP can verify states 1-4 mechanically. It cannot know whether the LLM truly read a document, so the audit fields use `unknown_agent_must_confirm` where appropriate.
+The MCP can verify states 1-4 mechanically. It cannot know whether the LLM truly read a document, so the audit fields use explicit review flags that the analyst or agent must complete after reading the returned sources.
 
 ## Tool roles
 
 ### Discovery
 
-`fmp_list_transcript_dates` selects recent available calls from `min_year` onward and returns a recommended fetch action for each selected period.
+`fmp_list_transcript_dates` selects recent available calls from `min_year` onward and returns recommended fetch actions with only `symbol`, `year`, and `quarter`.
 
 ### Canonical transcript fetch
 
-`fmp_get_earnings_call_transcript` is the canonical source for transcript text. It returns:
+`fmp_get_earnings_call_transcript` is the canonical source for transcript text. Its public input is intentionally small:
 
-- requested section: `full`, `prepared_remarks`, `qna`, or `metadata`
-- completeness metadata
-- Q&A metadata
-- operator start / close detection
-- tool-side truncation flags
-- next best action if payload is incomplete or truncated
+- `symbol`
+- `year`
+- `quarter`
+
+The tool returns the complete transcript text supplied by FMP for that selected period plus completeness metadata, Q&A metadata, operator start / close detection and next best actions if the source appears incomplete.
 
 ### Evidence pack
 
@@ -61,7 +60,7 @@ The MCP can verify states 1-4 mechanically. It cannot know whether the LLM truly
 - scoring readiness and blocking items
 - next actions
 
-It does not certify that an LLM has read full transcripts.
+It does not embed transcript text. This keeps the evidence-pack tool friendly to OpenAI tool-call safety checks and makes the dedicated transcript tool the only place where full earnings-call text is returned. Count-style inputs are bounded and clamped server-side to reduce accidental oversized calls.
 
 ### Validation
 
@@ -76,26 +75,24 @@ The server uses heuristic checks:
 - Q&A length
 - operator close markers
 - explicit truncation markers
-- prepared remarks and Q&A section splitting
+- prepared remarks and Q&A section detection for metadata
 
-These checks are conservative and intentionally favor follow-up fetching when evidence is ambiguous.
+These checks are conservative and intentionally favor follow-up verification when evidence is ambiguous.
 
 ## Strict report workflow behavior
 
 When `strict_report_workflow=true`, the evidence pack avoids silent fallbacks. If financial tables do not match the selected periods exactly, the payload marks `no_exact_period_match` rather than pretending the latest rows are reviewed.
 
-The evidence pack now separates primary statement review from secondary metrics. Income Statement, Balance Sheet and Cash Flow Statement are required for the latest completed fiscal year and every selected quarter. Key metrics, ratios and financial growth are supporting context only.
+The evidence pack separates primary statement review from secondary metrics. Income Statement, Balance Sheet and Cash Flow Statement are required for the latest completed fiscal year and every selected quarter. Key metrics, ratios and financial growth are supporting context only.
 
 The evidence pack also sets scoring blockers unless required transcript, Q&A, release and statement-table review can be verified through the workflow.
 
 ## Why this prevents LLM errors
 
-The prior design could return transcript flags that looked positive while the visible payload was truncated. Under a strict prompt, an LLM could incorrectly delete a company from the run or incorrectly score it.
+The evidence pack gives the LLM explicit operational states:
 
-The new design gives the LLM explicit operational states:
-
-- transcript exists but not returned in full
-- Q&A detected but not included
-- source may be complete, but payload is partial
+- transcript exists but is not embedded in the evidence pack
 - use `fmp_get_earnings_call_transcript` next
+- Q&A review must be confirmed after reading the full returned transcript
+- official releases and statement tables must be reviewed separately
 - do not score until blocking items are cleared

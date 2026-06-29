@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 from .evidence import (
-    TranscriptSection,
     build_evidence_pack,
     build_transcript_payload,
     normalize_transcript_dates,
@@ -27,20 +27,32 @@ mcp = FastMCP(
     port=int(os.getenv("PORT", "8000")),
 )
 
-TRANSCRIPT_TOOL_MAX_CHARS = int(os.getenv("TRANSCRIPT_TOOL_MAX_CHARS", "200000"))
+Symbol = Annotated[str, Field(description="Public ticker symbol, for example ONDS.")]
+FiscalYear = Annotated[int, Field(ge=1990, le=2100, description="Fiscal year.")]
+FiscalQuarter = Annotated[int, Field(ge=1, le=4, description="Fiscal quarter, 1 through 4.")]
+MinYear = Annotated[int, Field(ge=1990, le=2100, description="Earliest fiscal year to consider.")]
+TranscriptDateLimit = Annotated[int, Field(ge=1, le=4, description="Number of transcript periods to select.")]
+RequestedCalls = Annotated[int, Field(ge=1, le=4, description="Number of earnings-call periods to include in the evidence workflow.")]
+StatementLimit = Annotated[int, Field(ge=1, le=12, description="Number of statement rows to request.")]
+FilingLimit = Annotated[int, Field(ge=1, le=50, description="Number of SEC filing rows to request.")]
+
+
+def _clamp(value: int, *, minimum: int, maximum: int) -> int:
+    return max(minimum, min(int(value), maximum))
 
 
 @mcp.tool()
-async def fmp_get_company_profile(symbol: str) -> dict[str, Any]:
+async def fmp_get_company_profile(symbol: Symbol) -> dict[str, Any]:
     """Get company profile, sector, industry, market cap and descriptive metadata from FMP."""
     return {"symbol": symbol.upper(), "data": await FMPClient().profile(symbol)}
 
 
 @mcp.tool()
 async def fmp_list_transcript_dates(
-    symbol: str, min_year: int = 2025, limit: int = 2
+    symbol: Symbol, min_year: MinYear = 2025, limit: TranscriptDateLimit = 2
 ) -> dict[str, Any]:
     """List available FMP earnings-call transcript periods."""
+    limit = _clamp(limit, minimum=1, maximum=4)
     raw = await FMPClient().transcript_dates(symbol)
     selected = normalize_transcript_dates(raw, min_year=min_year, max_items=limit)
     return {
@@ -56,9 +68,8 @@ async def fmp_list_transcript_dates(
                     "symbol": symbol.upper(),
                     "year": "",
                     "quarter": "",
-                    "section": "full",
                 },
-                "reason": "Fetch each selected period with the canonical transcript tool before scoring.",
+                "reason": "Fetch each selected period with the canonical complete-transcript tool before scoring.",
             }
             if selected
             else {
@@ -73,37 +84,37 @@ async def fmp_list_transcript_dates(
 
 @mcp.tool()
 async def fmp_get_earnings_call_transcript(
-    symbol: str,
-    year: int,
-    quarter: int,
-    section: TranscriptSection = "full",
-    max_chars: int = TRANSCRIPT_TOOL_MAX_CHARS,
+    symbol: Symbol,
+    year: FiscalYear,
+    quarter: FiscalQuarter,
 ) -> dict[str, Any]:
-    """Fetch one earnings-call transcript, optionally returning full, prepared remarks, Q&A, or metadata."""
+    """Fetch one complete earnings-call transcript with completeness metadata."""
     data = await FMPClient().transcript(symbol=symbol, year=year, quarter=quarter)
     payload = build_transcript_payload(
         symbol=symbol,
         year=year,
         quarter=quarter,
         raw=data,
-        section=section,
-        include_full_text=section != "metadata",
-        max_chars=min(max_chars, TRANSCRIPT_TOOL_MAX_CHARS),
+        section="full",
+        include_full_text=True,
+        max_chars=None,
     )
-    payload["raw_data"] = data if not payload["content_truncated_by_tool"] and section == "metadata" else None
+    payload["raw_data"] = None
     payload["audit_note"] = (
-        "The transcript tool returns the requested section with mechanical completeness metadata. "
+        "The transcript tool returns the complete transcript text provided by FMP with mechanical completeness metadata. "
+        "The public tool input intentionally does not expose section or max_chars controls. "
         "Mark full_call_text_read and qna_reviewed yes only after actually reading the returned text. "
-        "If content_truncated_by_tool is true, use section='prepared_remarks' and section='qna' separately."
+        "If completeness warnings are present, verify the source before scoring."
     )
     return payload
 
 
 @mcp.tool()
 async def fmp_get_statement_tables(
-    symbol: str, period: Literal["quarter", "annual"] = "quarter", limit: int = 8
+    symbol: Symbol, period: Literal["quarter", "annual"] = "quarter", limit: StatementLimit = 8
 ) -> dict[str, Any]:
     """Fetch statement tables. Use period='annual' for latest completed fiscal year review and period='quarter' for selected-quarter review."""
+    limit = _clamp(limit, minimum=1, maximum=12)
     client = FMPClient()
     return {
         "symbol": symbol.upper(),
@@ -128,13 +139,14 @@ async def fmp_get_statement_tables(
 
 @mcp.tool()
 async def fmp_search_sec_filings(
-    symbol: str,
+    symbol: Symbol,
     from_date: str = "2025-01-01",
     to_date: str | None = None,
-    limit: int = 100,
+    limit: FilingLimit = 50,
     prioritize_for_report: bool = True,
 ) -> dict[str, Any]:
     """Search SEC filings and optionally prioritize earnings releases plus 10-Q/10-K report evidence."""
+    limit = _clamp(limit, minimum=1, maximum=50)
     raw = await FMPClient().sec_filings(symbol, from_date=from_date, to_date=to_date, limit=limit)
     return {
         "symbol": symbol.upper(),
@@ -147,7 +159,7 @@ async def fmp_search_sec_filings(
 
 @mcp.tool()
 async def fmp_get_earnings_calendar(
-    symbol: str | None = None, from_date: str | None = None, to_date: str | None = None
+    symbol: Symbol | None = None, from_date: str | None = None, to_date: str | None = None
 ) -> dict[str, Any]:
     """Fetch earnings calendar data, including announcement dates and EPS actual/estimate when available."""
     return {
@@ -160,21 +172,18 @@ async def fmp_get_earnings_calendar(
 
 @mcp.tool()
 async def fmp_build_research_evidence_pack(
-    symbol: str,
-    min_year: int = 2025,
-    requested_calls: int = 2,
+    symbol: Symbol,
+    min_year: MinYear = 2025,
+    requested_calls: RequestedCalls = 2,
     strict_report_workflow: bool = True,
-    include_transcript_text: bool = False,
-    max_transcript_chars: int = 24_000,
 ) -> dict[str, Any]:
-    """Build a report evidence manifest with selected periods, source status, tables, filings and next actions."""
+    """Build a report evidence manifest with selected periods, source status, tables, filings and next actions; transcript text is not embedded."""
+    requested_calls = _clamp(requested_calls, minimum=1, maximum=4)
     return await build_evidence_pack(
         symbol=symbol,
         min_year=min_year,
         requested_calls=requested_calls,
         strict_report_workflow=strict_report_workflow,
-        include_transcript_text=include_transcript_text,
-        max_transcript_chars=max_transcript_chars,
     )
 
 

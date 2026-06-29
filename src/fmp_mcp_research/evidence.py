@@ -34,6 +34,7 @@ TRUNCATION_MARKERS = re.compile(
 QUESTION_LINE = re.compile(r"\b(question|analyst|operator)\b", re.I)
 ANSWER_LINE = re.compile(r"\b(answer|ceo|cfo|chief|president|officer|management)\b", re.I)
 
+EVIDENCE_PACK_VERSION = "0.3.1"
 DEFAULT_TRANSCRIPT_CHAR_BUDGET = 120_000
 MIN_FULL_CALL_WORDS = 2_500
 CHUNK_SIZE_CHARS = 24_000
@@ -393,7 +394,7 @@ def build_transcript_payload(
     raw: Any,
     section: TranscriptSection = "full",
     include_full_text: bool = True,
-    max_chars: int = DEFAULT_TRANSCRIPT_CHAR_BUDGET,
+    max_chars: int | None = DEFAULT_TRANSCRIPT_CHAR_BUDGET,
 ) -> dict[str, Any]:
     items = _safe_list(raw)
     full_text = combine_transcript_text(items)
@@ -404,11 +405,17 @@ def build_transcript_payload(
         "qna": sections["qna"],
         "metadata": "",
     }[section]
-    content_truncated_by_tool = len(selected_text) > max_chars
-    returned_text = selected_text[:max_chars] if include_full_text else ""
+    content_truncated_by_tool = max_chars is not None and len(selected_text) > max_chars
+    if not include_full_text:
+        returned_text = ""
+    elif max_chars is None:
+        returned_text = selected_text
+    else:
+        returned_text = selected_text[:max_chars]
     assessment = assess_transcript_completeness(items)
     assessment["total_character_count"] = len(selected_text)
     assessment["returned_character_count"] = len(returned_text)
+    safe_section_text_limit = max_chars if max_chars is not None else len(selected_text)
     return {
         "symbol": symbol.upper(),
         "year": year,
@@ -420,23 +427,27 @@ def build_transcript_payload(
         "returned_character_count": len(returned_text),
         "total_character_count": len(selected_text),
         "full_text": returned_text if section == "full" else None,
-        "prepared_remarks": returned_text if section == "prepared_remarks" else (sections["prepared_remarks"][:max_chars] if section == "full" and include_full_text else None),
-        "qna": returned_text if section == "qna" else (sections["qna"][:max_chars] if section == "full" and include_full_text else None),
+        "prepared_remarks": returned_text if section == "prepared_remarks" else None,
+        "qna": returned_text if section == "qna" else None,
         "chunks": chunk_text(selected_text) if content_truncated_by_tool else [],
         "completeness": assessment,
         "recommended_next_actions": transcript_next_actions(symbol.upper(), year, quarter, section, content_truncated_by_tool, assessment),
+        "section_text_counts": {
+            "prepared_remarks_character_count": len(sections["prepared_remarks"]),
+            "qna_character_count": len(sections["qna"]),
+            "section_preview_character_limit": safe_section_text_limit,
+        },
     }
 
 
 def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, truncated: bool, assessment: dict[str, Any]) -> list[dict[str, Any]]:
     actions = []
     if truncated and section == "full":
-        for next_section in ("prepared_remarks", "qna"):
-            actions.append({
-                "tool": "fmp_get_earnings_call_transcript",
-                "arguments": {"symbol": symbol, "year": year, "quarter": quarter, "section": next_section},
-                "reason": f"Fetch {next_section} separately because the full transcript exceeded the server payload budget.",
-            })
+        actions.append({
+            "tool": "fmp_get_earnings_call_transcript",
+            "arguments": {"symbol": symbol, "year": year, "quarter": quarter},
+            "reason": "Fetch and review the complete transcript. The public tool input does not expose section or max_chars controls.",
+        })
     if assessment.get("transcript_quality_status") == "incomplete":
         actions.append({
             "tool": "fmp_list_transcript_dates",
@@ -452,8 +463,6 @@ async def build_evidence_pack(
     min_year: int = 2025,
     requested_calls: int = 2,
     strict_report_workflow: bool = True,
-    include_transcript_text: bool = False,
-    max_transcript_chars: int = 24_000,
 ) -> dict[str, Any]:
     from .fmp_client import FMPClient
 
@@ -479,9 +488,10 @@ async def build_evidence_pack(
             "quarter": period["quarter"],
             "period_label": period["period_label"],
             "transcript_available": True,
-            "full_call_text_included": include_transcript_text,
+            "full_call_text_included": False,
             "full_call_text_read_by_agent": False,
             "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
+            "content_policy_note": "Transcript text is intentionally not embedded in the evidence pack; use the recommended action to fetch the complete call.",
         })
 
     financial_tables = [
@@ -509,8 +519,8 @@ async def build_evidence_pack(
     transcript_actions = [
         {
             "tool": "fmp_get_earnings_call_transcript",
-            "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"], "section": "full"},
-            "reason": "Fetch and read the full transcript before scoring.",
+            "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"]},
+            "reason": "Fetch and read the complete transcript before scoring.",
             "required_for_scoring": True,
             "review_scope": "selected_quarter_transcript",
             "period_label": p["period_label"],
@@ -520,7 +530,7 @@ async def build_evidence_pack(
     statement_actions = financial_statement_review_actions(symbol_upper, selected_periods)
 
     return {
-        "evidence_pack_version": "0.3.0",
+        "evidence_pack_version": EVIDENCE_PACK_VERSION,
         "symbol": symbol_upper,
         "selected_periods": selected_periods,
         "latest_completed_fiscal_year": latest_full_year,

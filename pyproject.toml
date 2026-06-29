@@ -1,6 +1,6 @@
 [project]
 name = "fmp-mcp-research"
-version = "0.3.0"
+version = "0.3.1"
 description = "Remote MCP server for FMP-backed buy-side earnings-call research evidence packs."
 readme = "README.md"
 requires-python = ">=3.11"
