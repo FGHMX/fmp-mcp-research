@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-CONTRACT_VERSION = "0.3.0"
+CONTRACT_VERSION = "0.3.1"
 
 REPORT_OUTPUT_SECTIONS = [
     "company_snapshot",

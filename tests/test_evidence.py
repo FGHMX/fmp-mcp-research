@@ -44,15 +44,15 @@ def test_build_transcript_payload_supports_qna_section():
     assert payload["content_truncated_by_tool"] is False
 
 
-def test_build_transcript_payload_recommends_section_fetches_when_full_truncated():
+def test_build_transcript_payload_recommends_complete_refetch_when_full_truncated():
     raw = [{"content": "Prepared remarks. " + "word " * 2000}]
     payload = build_transcript_payload(
         symbol="TEST", year=2026, quarter=1, raw=raw, section="full", max_chars=100
     )
     assert payload["content_truncated_by_tool"] is True
     args = [action["arguments"] for action in payload["recommended_next_actions"]]
-    assert {"symbol": "TEST", "year": 2026, "quarter": 1, "section": "prepared_remarks"} in args
-    assert {"symbol": "TEST", "year": 2026, "quarter": 1, "section": "qna"} in args
+    assert {"symbol": "TEST", "year": 2026, "quarter": 1} in args
+    assert all("section" not in item and "max_chars" not in item for item in args)
 
 
 def test_normalize_transcript_dates_filters_and_sorts():
@@ -84,7 +84,7 @@ def test_prioritize_sec_filings_identifies_earnings_release_candidates():
 
 def test_validate_evidence_payload_blocks_unread_sources():
     payload = {
-        "evidence_pack_version": "0.3.0",
+        "evidence_pack_version": "0.3.1",
         "selected_periods": [{"period_label": "Q1 2026"}],
         "source_audit_template": [
             {
@@ -130,7 +130,7 @@ def test_financial_statement_review_actions_use_existing_statement_tables_tool()
 
 def test_validate_evidence_payload_blocks_unreviewed_financial_statements():
     payload = {
-        "evidence_pack_version": "0.3.0",
+        "evidence_pack_version": "0.3.1",
         "selected_periods": [{"period_label": "Q1 2026"}],
         "source_audit_template": [
             {

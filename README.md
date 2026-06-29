@@ -4,19 +4,14 @@ Remote MCP server for ChatGPT or another LLM that exposes read-only Financial Mo
 
 The server does **not** generate final investment recommendations. It builds evidence manifests, returns transcript completeness metadata, finds filings/tables, and helps an analyst or LLM decide whether a scorecard is supported by the evidence.
 
-## Version 0.3.0 changes
+## Version 0.3.1 changes
 
-- Aligned the transcript tool contract with the documented workflow: `section` and `max_chars` are now supported.
-- Fixed truncation-marker detection so normal transcripts are not falsely marked as truncated.
-- Added a softer `transcript_quality_status`: `complete`, `usable_with_warnings`, or `incomplete`.
-- Kept Q&A split uncertainty as a warning rather than an automatic hard block.
-- Added `contract_version` and `evidence_pack_version`.
-- Added dev dependencies for pytest, ruff, mypy and respx.
-- Added CI skeleton for test/lint.
-- Reformatted the project into maintainable Python modules.
-- Hardened Docker by running as a non-root user.
-- Added explicit statement-table review actions for the latest completed fiscal year and selected quarters.
-- Reduced default SEC filing noise in evidence packs by omitting non-core filings unless specifically relevant.
+- Removed public `include_transcript_text` and `max_transcript_chars` inputs from `fmp_build_research_evidence_pack`.
+- Kept evidence packs as manifests only: transcript text is not embedded; the required transcript fetches appear in `recommended_next_actions`.
+- Removed public `section` and `max_chars` inputs from `fmp_get_earnings_call_transcript`.
+- Made `fmp_get_earnings_call_transcript` return the complete transcript supplied by FMP for the requested symbol/year/quarter.
+- Updated transcript-related recommended actions so they pass only `symbol`, `year`, and `quarter`.
+- Bumped package, contract, and evidence-pack versions to `0.3.1`.
 
 ## Tools exposed
 
@@ -24,7 +19,7 @@ The server does **not** generate final investment recommendations. It builds evi
 |---|---|
 | `fmp_get_company_profile` | Get sector, industry, market cap and descriptive metadata. |
 | `fmp_list_transcript_dates` | Discover available earnings-call transcript periods. |
-| `fmp_get_earnings_call_transcript` | Fetch full transcript, prepared remarks, Q&A, or metadata. |
+| `fmp_get_earnings_call_transcript` | Fetch the complete transcript for a selected earnings-call period. |
 | `fmp_get_statement_tables` | Fetch income statement, balance sheet, cash flow, key metrics, ratios and growth. |
 | `fmp_search_sec_filings` | Find and prioritize 8-K/6-K earnings releases plus 10-Q/10-K evidence. |
 | `fmp_get_earnings_calendar` | Confirm earnings dates and EPS actual/estimate context. |
@@ -37,14 +32,22 @@ The server does **not** generate final investment recommendations. It builds evi
 1. Call `research_report_contract(sector="healthcare_technology")` or the relevant sector.
 2. Call `fmp_build_research_evidence_pack(symbol="PSNL", min_year=2025, requested_calls=2)`.
 3. Read `selected_periods`, `evidence_manifest`, `scoring_readiness` and `recommended_next_actions`.
-4. For every selected period, call `fmp_get_earnings_call_transcript(symbol, year, quarter, section="full")`.
-5. If `content_truncated_by_tool=true`, fetch `section="prepared_remarks"` and `section="qna"` separately.
-6. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after actually reading the returned text.
-7. Use `fmp_search_sec_filings` to locate official 8-K/6-K releases and 10-Q/10-K filings.
-8. Use `fmp_get_statement_tables(period="annual")` to review Income Statement, Balance Sheet and Cash Flow Statement for the latest completed fiscal year.
-9. Use `fmp_get_statement_tables(period="quarter")` to review Income Statement, Balance Sheet and Cash Flow Statement for every selected quarter.
-10. Use key metrics, ratios and growth tables as supporting context, not as a substitute for primary statements.
-11. Complete both `source_audit_template` and `financial_statement_audit_template` before producing a scorecard.
+4. For every selected period, call `fmp_get_earnings_call_transcript(symbol, year, quarter)`.
+5. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after actually reading the returned transcript.
+6. Use `fmp_search_sec_filings` to locate official 8-K/6-K releases and 10-Q/10-K filings.
+7. Use `fmp_get_statement_tables(period="annual")` to review Income Statement, Balance Sheet and Cash Flow Statement for the latest completed fiscal year.
+8. Use `fmp_get_statement_tables(period="quarter")` to review Income Statement, Balance Sheet and Cash Flow Statement for every selected quarter.
+9. Use key metrics, ratios and growth tables as supporting context, not as a substitute for primary statements.
+10. Complete both `source_audit_template` and `financial_statement_audit_template` before producing a scorecard.
+
+## OpenAI-friendly tool design
+
+- Evidence packs do not return bulk transcript text.
+- Transcript text is fetched only through the dedicated transcript tool.
+- The transcript tool schema avoids large-content controls such as user-provided maximum character counts.
+- Recommended transcript actions use a small, fixed argument shape: `symbol`, `year`, and `quarter`.
+- Count-style inputs use bounded defaults and server-side clamps to avoid oversized tool calls.
+- The server remains read-only and does not expose tools that generate final investment recommendations.
 
 ## Local development
 
