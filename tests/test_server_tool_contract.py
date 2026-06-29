@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 SERVER_PATH = Path(__file__).resolve().parents[1] / "src" / "fmp_mcp_research" / "server.py"
 
 
