@@ -24,6 +24,18 @@ _EARNINGS_RELEASE_TERMS = re.compile(
 )
 _HTML_EXTENSION_RE = re.compile(r"\.(htm|html|txt)$", re.I)
 
+_EARNINGS_DOCUMENT_POSITIVE_TERMS = re.compile(
+    r"financial results|quarterly results|full year|total revenue|net income|diluted share|"
+    r"revenue comparison|cost of materials|consolidated balance sheets|consolidated statements|"
+    r"statements of income|statements of cash flows|cash flows|guidance",
+    re.I,
+)
+_CAPITAL_RETURN_ONLY_TERMS = re.compile(
+    r"share repurchase authorization|repurchase program|quarterly cash dividend|"
+    r"10b5-1|rule 10b-18",
+    re.I,
+)
+
 
 def _clean_text(value: str) -> str:
     value = html.unescape(value or "")
@@ -295,9 +307,11 @@ class SECClient:
             )
 
         index_json = await self._filing_index(cik_int, candidate["accessionNumber"])
-        document = self._select_best_document(index_json, candidate)
-        document_url = self._document_url(cik_int, candidate["accessionNumber"], document["name"])
-        raw_html = await self._get_text(document_url)
+        document, document_url, raw_html = await self._select_best_document_with_content(
+            index_json=index_json,
+            filing=candidate,
+            cik_int=cik_int,
+        )
         release_json = html_to_llm_json(
             raw_html,
             include_html=include_html,
@@ -403,35 +417,163 @@ class SECClient:
         best = max(relevant, key=score)
         return best if score(best)[0] >= 250 else None
 
+    async def _select_best_document_with_content(
+        self,
+        *,
+        index_json: dict[str, Any],
+        filing: dict[str, Any],
+        cik_int: int,
+    ) -> tuple[dict[str, Any], str, str]:
+        """Select the best exhibit using metadata first, then actual document text."""
+        documents = self._html_documents(index_json)
+        if not documents:
+            raise SECError("SEC filing index did not contain an HTML/TXT document")
+
+        primary = str(filing.get("primaryDocument") or "")
+        accession_number = str(filing.get("accessionNumber") or "")
+        if not accession_number:
+            raise SECError("SEC filing candidate did not include an accession number")
+
+        metadata_ranked = sorted(
+            documents,
+            key=lambda doc: self._document_metadata_score(doc, primary),
+            reverse=True,
+        )[:8]
+
+        scored: list[tuple[int, int, str, dict[str, Any], str, str]] = []
+
+        for document in metadata_ranked:
+            name = str(document.get("name") or "")
+            if not name:
+                continue
+
+            document_url = self._document_url(cik_int, accession_number, name)
+            raw_html = await self._get_text(document_url)
+
+            parsed = html_to_llm_json(
+                raw_html,
+                include_html=False,
+                include_tables=True,
+            )
+
+            parsed_text = str(parsed.get("text") or "")
+            tables = parsed.get("tables")
+            table_count = len(tables) if isinstance(tables, list) else 0
+
+            metadata_score = self._document_metadata_score(document, primary)[0]
+            content_score = self._document_content_score(
+                text=parsed_text,
+                table_count=table_count,
+            )
+
+            scored.append(
+                (
+                    metadata_score + content_score,
+                    len(parsed_text),
+                    name,
+                    document,
+                    document_url,
+                    raw_html,
+                )
+            )
+
+        if not scored:
+            raise SECError("SEC filing index documents could not be fetched for scoring")
+
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        _, _, _, document, document_url, raw_html = scored[0]
+
+        return document, document_url, raw_html
+
     @staticmethod
-    def _select_best_document(index_json: dict[str, Any], filing: dict[str, Any]) -> dict[str, Any]:
+    def _html_documents(index_json: dict[str, Any]) -> list[dict[str, Any]]:
         items = index_json.get("directory", {}).get("item", [])
         if isinstance(items, dict):
             items = [items]
-        documents = [item for item in items if isinstance(item, dict) and _HTML_EXTENSION_RE.search(str(item.get("name") or ""))]
-        primary = str(filing.get("primaryDocument") or "")
 
-        def doc_score(doc: dict[str, Any]) -> tuple[int, str]:
-            name = str(doc.get("name") or "")
-            description = str(doc.get("description") or "")
-            doc_type = str(doc.get("type") or "")
-            metadata = f"{name} {description} {doc_type}"
-            value = 0
-            if name == primary:
-                value += 100
-            if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", doc_type, re.I):
-                value += 500
-            if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", name + " " + description, re.I):
-                value += 400
-            if _EARNINGS_RELEASE_TERMS.search(metadata):
-                value += 300
-            if name.lower().endswith((".htm", ".html")):
-                value += 50
-            return value, name
+        return [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and _HTML_EXTENSION_RE.search(str(item.get("name") or ""))
+        ]
 
+    @staticmethod
+    def _document_metadata_score(doc: dict[str, Any], primary: str) -> tuple[int, str]:
+        name = str(doc.get("name") or "")
+        description = str(doc.get("description") or "")
+        doc_type = str(doc.get("type") or "")
+        metadata = f"{name} {description} {doc_type}"
+        value = 0
+
+        if name == primary:
+            value += 100
+
+        if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", doc_type, re.I):
+            value += 500
+
+        if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", name + " " + description, re.I):
+            value += 400
+
+        if re.search(
+            r"(?:^|[_\-.])ex-?99[_\-.]?1(?:\D|$)|exhibit\s*99\.1",
+            metadata,
+            re.I,
+        ):
+            value += 90
+
+        if re.search(
+            r"(?:^|[_\-.])ex-?99[_\-.]?[2-9](?:\D|$)|exhibit\s*99\.[2-9]",
+            metadata,
+            re.I,
+        ):
+            value -= 20
+
+        if _EARNINGS_RELEASE_TERMS.search(metadata):
+            value += 300
+
+        if name.lower().endswith((".htm", ".html")):
+            value += 50
+
+        return value, name
+
+    @staticmethod
+    def _document_content_score(*, text: str, table_count: int) -> int:
+        value = 0
+
+        positive_matches = _EARNINGS_DOCUMENT_POSITIVE_TERMS.findall(text)
+        value += min(len(positive_matches), 12) * 120
+
+        if table_count >= 3:
+            value += 350
+        elif table_count:
+            value += table_count * 50
+
+        if len(text) >= 10000:
+            value += 250
+        elif len(text) >= 5000:
+            value += 100
+
+        if (
+            _CAPITAL_RETURN_ONLY_TERMS.search(text)
+            and len(positive_matches) < 3
+            and table_count < 3
+        ):
+            value -= 700
+
+        return value
+
+    @staticmethod
+    def _select_best_document(index_json: dict[str, Any], filing: dict[str, Any]) -> dict[str, Any]:
+        documents = SECClient._html_documents(index_json)
         if not documents:
             raise SECError("SEC filing index did not contain an HTML/TXT document")
-        return max(documents, key=doc_score)
+
+        primary = str(filing.get("primaryDocument") or "")
+        return max(
+            documents,
+            key=lambda doc: SECClient._document_metadata_score(doc, primary),
+        )
 
     @staticmethod
     def _candidate_summary(row: dict[str, Any], filing_date: str) -> dict[str, Any]:
