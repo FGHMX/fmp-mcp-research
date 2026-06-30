@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import re
+from dataclasses import asdict, dataclass
 from datetime import date
 from typing import Any, Literal
 
-from .report_contract import REQUIRED_SOURCE_FLAGS
-
-TranscriptSection = Literal["full", "prepared_remarks", "qna", "metadata"]
+TranscriptSection = Literal["full", "prepared_remarks", "q_and_a", "qna", "metadata"]
 
 QA_START_MARKERS = re.compile(
     r"(question-and-answer session\s*$|questions and answers\s*$|q&a session\s*$|"
@@ -34,10 +33,314 @@ TRUNCATION_MARKERS = re.compile(
 QUESTION_LINE = re.compile(r"\b(question|analyst|operator)\b", re.I)
 ANSWER_LINE = re.compile(r"\b(answer|ceo|cfo|chief|president|officer|management)\b", re.I)
 
-EVIDENCE_PACK_VERSION = "0.3.3"
+EVIDENCE_PACK_VERSION = "0.3.4"
 DEFAULT_TRANSCRIPT_CHAR_BUDGET = 120_000
 MIN_FULL_CALL_WORDS = 2_500
 CHUNK_SIZE_CHARS = 24_000
+OPENAI_RETRY_SUGGESTION = (
+    "If the host rejects or drops this tool call, it may be useful to retry the same call "
+    "up to 3 total attempts before treating the source as unavailable."
+)
+MIN_REASONABLE_QA_POSITION_RATIO = 0.12
+MAX_MANAGEMENT_TO_OPERATOR_DISTANCE = 4000
+
+
+@dataclass
+class SplitCandidate:
+    position: int
+    method: str
+    confidence: float
+    matched_text: str
+    position_ratio: float = 0.0
+    adjusted_confidence: float = 0.0
+
+
+def clean_transcript_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\u00a0", " ").replace("\u200b", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n[ \t]+", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def normalize_for_search(text: str) -> str:
+    replacements = {
+        "’": "'",
+        "‘": "'",
+        "“": '"',
+        "”": '"',
+        "–": "-",
+        "—": "-",
+        "−": "-",
+        "…": "...",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def normalize_speaker_labels(text: str) -> str:
+    return re.sub(r"(?im)^(\s*Operator)\s*[-–—]\s+", r"\1: ", text)
+
+
+def find_speaker_positions(text: str, speaker: str) -> list[int]:
+    pattern = re.compile(
+        rf"(?:^|\n)\s*{re.escape(speaker)}\s*(?::|-)\s*",
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return [m.start() for m in pattern.finditer(text)]
+
+
+def find_operator_positions(text: str) -> list[int]:
+    return find_speaker_positions(text, "Operator")
+
+
+def find_explicit_qa_heading(text: str) -> re.Match[str] | None:
+    patterns = [
+        r"^\s*Question[- ]and[- ]Answer Session\s*$",
+        r"^\s*Questions and Answers\s*$",
+        r"^\s*Question and Answer Session\s*$",
+        r"^\s*Question and Answer\s*$",
+        r"^\s*Q&A Session\s*$",
+        r"^\s*Q&A\s*$",
+        r"^\s*Analyst Q&A\s*$",
+    ]
+    pattern = re.compile(
+        "|".join(f"(?:{item})" for item in patterns),
+        flags=re.IGNORECASE | re.MULTILINE,
+    )
+    return pattern.search(text)
+
+
+def find_management_qa_transition(text: str) -> re.Match[str] | None:
+    patterns = [
+        r"(?:with that|and with that),?\s+(?:we will|we'll|let's|let us)\s+(?:now\s+)?(?:open|begin|start|move to|move into)\s+(?:the call\s+)?(?:for|to)?\s*(?:questions|q&a)",
+        r"(?:with that|and with that),?\s+(?:I will|I'll)\s+(?:now\s+)?(?:turn|hand)\s+(?:the call\s+)?(?:back\s+)?(?:over\s+)?(?:to\s+)?(?:the\s+)?operator\s+(?:for|to)\s+(?:questions|q&a)",
+        r"(?:we will|we'll|let's|let us)\s+(?:now\s+)?(?:open|begin|start|move to|move into)\s+(?:the call\s+)?(?:for|to)?\s*(?:questions|q&a)",
+        r"(?:we are|we're)\s+(?:now\s+)?ready\s+(?:to take|for)\s+(?:your\s+)?questions",
+        r"(?:operator),?\s+(?:we are|we're)\s+ready\s+(?:to take|for)\s+(?:your\s+)?questions",
+        r"(?:operator),?\s+(?:please open|please begin|please poll)\s+(?:the line|the call|the lines)\s+(?:for|to)\s+(?:questions|q&a)",
+        r"(?:operator),?\s+(?:may we have|can we have|please provide)\s+(?:the first question|our first question)",
+        r"(?:may we have|can we have)\s+(?:the first question|our first question),?\s+please",
+        r"(?:after that|afterwards),?\s+(?:we will|we'll)\s+open\s+(?:the call\s+)?(?:to|for)\s+(?:questions|q&a)",
+        r"(?:we will|we'll)\s+then\s+(?:open|begin|start)\s+(?:the call\s+)?(?:for|to)\s+(?:questions|q&a)",
+        r"(?:that concludes|this concludes)\s+(?:our\s+)?(?:prepared remarks|formal remarks)",
+    ]
+    pattern = re.compile("|".join(f"(?:{item})" for item in patterns), flags=re.IGNORECASE)
+    return pattern.search(text)
+
+
+def find_operator_qa_phrase(text: str) -> re.Match[str] | None:
+    patterns = [
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:Our first question|The first question|First question)",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:We'll take|We will take|We'll go ahead and take|We will go ahead and take)\s+our\s+first\s+question",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:And our first question|Your first question)",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:The question comes from|Our next question comes from)",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:We will now|We'll now|At this time, we will|At this time, we'll|We are now going to)\s+(?:begin|open|start|take)\s+(?:the )?(?:question-and-answer|question and answer|Q&A|questions)",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:If you would like to ask a question|To ask a question)",
+        r"Operator\s*:\s*(?:Thank you\.?\s*)?(?:Certainly\.?\s*)?(?:Ladies and gentlemen),?\s+(?:we will now|we'll now)\s+(?:begin|open|start)\s+(?:the )?(?:question-and-answer|Q&A|questions)",
+    ]
+    pattern = re.compile("|".join(f"(?:{item})" for item in patterns), flags=re.IGNORECASE)
+    return pattern.search(text)
+
+
+def find_first_analyst_question_like_pattern(text: str) -> re.Match[str] | None:
+    patterns = [
+        r"(?:Our first question|The first question|First question)\s+(?:comes|is)\s+from\s+",
+        r"(?:We'll take|We will take|We'll go ahead and take|We will go ahead and take)\s+our\s+first\s+question\s+from\s+",
+        r"(?:Your first question)\s+(?:comes|is)\s+from\s+",
+        r"(?:Next question|Our next question)\s+(?:comes|is)\s+from\s+",
+    ]
+    pattern = re.compile("|".join(f"(?:{item})" for item in patterns), flags=re.IGNORECASE)
+    return pattern.search(text)
+
+
+def find_second_operator_fallback(text: str) -> int | None:
+    operator_positions = find_operator_positions(text)
+    return operator_positions[1] if len(operator_positions) >= 2 else None
+
+
+def find_late_operator_fallback(text: str) -> int | None:
+    operator_positions = find_operator_positions(text)
+    transcript_length = len(text)
+    for position in operator_positions:
+        if position / max(transcript_length, 1) >= 0.25:
+            return position
+    return None
+
+
+def build_split_candidates(text: str) -> list[SplitCandidate]:
+    candidates: list[SplitCandidate] = []
+    candidate_specs = [
+        (find_explicit_qa_heading(text), "explicit_q_and_a_heading", 0.99),
+        (find_management_qa_transition(text), "management_qa_transition", 0.96),
+        (find_operator_qa_phrase(text), "operator_qa_phrase", 0.94),
+        (find_first_analyst_question_like_pattern(text), "first_analyst_question_like_pattern", 0.70),
+    ]
+    for match, method, confidence in candidate_specs:
+        if match:
+            candidates.append(
+                SplitCandidate(
+                    position=match.start(),
+                    method=method,
+                    confidence=confidence,
+                    matched_text=match.group(0),
+                )
+            )
+
+    late_operator_position = find_late_operator_fallback(text)
+    if late_operator_position is not None:
+        candidates.append(
+            SplitCandidate(
+                position=late_operator_position,
+                method="late_operator_intervention_fallback",
+                confidence=0.65,
+                matched_text="Late Operator intervention",
+            )
+        )
+
+    second_operator_position = find_second_operator_fallback(text)
+    if second_operator_position is not None:
+        candidates.append(
+            SplitCandidate(
+                position=second_operator_position,
+                method="second_operator_intervention_fallback",
+                confidence=0.55,
+                matched_text="Second Operator intervention",
+            )
+        )
+    return candidates
+
+
+def rank_candidates(
+    candidates: list[SplitCandidate],
+    text: str,
+) -> tuple[list[SplitCandidate], list[str]]:
+    warnings: list[str] = []
+    transcript_length = len(text)
+    for candidate in candidates:
+        ratio = candidate.position / max(transcript_length, 1)
+        candidate.position_ratio = ratio
+        adjusted = candidate.confidence
+        if ratio < MIN_REASONABLE_QA_POSITION_RATIO and candidate.method != "explicit_q_and_a_heading":
+            adjusted -= 0.30
+            warnings.append(f"qna_candidate_very_early:{candidate.method}:{ratio:.1%}")
+        if "fallback" in candidate.method:
+            adjusted -= 0.05
+        if ratio > 0.92 and "fallback" in candidate.method:
+            adjusted -= 0.20
+            warnings.append(f"qna_fallback_candidate_very_late:{candidate.method}:{ratio:.1%}")
+        if candidate.method == "explicit_q_and_a_heading":
+            adjusted += 0.02
+        if candidate.method == "management_qa_transition":
+            adjusted += 0.01
+        candidate.adjusted_confidence = max(0.0, min(adjusted, 1.0))
+    return candidates, warnings
+
+
+def choose_best_candidate(candidates: list[SplitCandidate]) -> SplitCandidate | None:
+    if not candidates:
+        return None
+    management_candidates = [c for c in candidates if c.method == "management_qa_transition"]
+    qna_start_candidates = [
+        c
+        for c in candidates
+        if c.method
+        in {
+            "operator_qa_phrase",
+            "late_operator_intervention_fallback",
+            "second_operator_intervention_fallback",
+            "first_analyst_question_like_pattern",
+        }
+    ]
+    for management_candidate in management_candidates:
+        for qna_candidate in qna_start_candidates:
+            distance = qna_candidate.position - management_candidate.position
+            if 0 < distance <= MAX_MANAGEMENT_TO_OPERATOR_DISTANCE:
+                management_candidate.adjusted_confidence = max(
+                    management_candidate.adjusted_confidence,
+                    0.97,
+                )
+                return management_candidate
+    return sorted(candidates, key=lambda c: (-c.adjusted_confidence, c.position))[0]
+
+
+def split_earnings_call_into_two_blocks(transcript_text: str) -> dict[str, Any]:
+    warnings: list[str] = []
+    text = normalize_speaker_labels(normalize_for_search(clean_transcript_text(transcript_text)))
+    if not text:
+        return {
+            "prepared_remarks": "",
+            "qna": "",
+            "qna_detected": False,
+            "qna_start_offset": None,
+            "split_method": None,
+            "confidence": 0.0,
+            "matched_text": None,
+            "position_ratio": None,
+            "warnings": ["empty_transcript_payload"],
+            "candidates": [],
+        }
+
+    candidates = build_split_candidates(text)
+    candidates, ranking_warnings = rank_candidates(candidates, text)
+    warnings.extend(ranking_warnings)
+    if not candidates:
+        warning = "qna_mentioned_but_no_reliable_qna_start" if QA_MENTION_MARKERS.search(text) else None
+        return {
+            "prepared_remarks": text,
+            "qna": "",
+            "qna_detected": False,
+            "qna_start_offset": None,
+            "split_method": None,
+            "confidence": 0.0,
+            "matched_text": None,
+            "position_ratio": None,
+            "warnings": [warning] if warning else [],
+            "candidates": [],
+        }
+
+    best = choose_best_candidate(candidates)
+    if best is None:
+        return {
+            "prepared_remarks": text,
+            "qna": "",
+            "qna_detected": False,
+            "qna_start_offset": None,
+            "split_method": None,
+            "confidence": 0.0,
+            "matched_text": None,
+            "position_ratio": None,
+            "warnings": ["unable_to_choose_qna_split_candidate"],
+            "candidates": [asdict(candidate) for candidate in candidates],
+        }
+
+    prepared_remarks = text[: best.position].strip()
+    qna = text[best.position :].strip()
+    if qna and len(qna.split()) < 250:
+        warnings.append("qna_detected_but_too_short")
+    if prepared_remarks and len(prepared_remarks) / max(len(text), 1) < 0.10:
+        warnings.append("prepared_remarks_unusually_short")
+    if best.adjusted_confidence < 0.70:
+        warnings.append("low_confidence_qna_split")
+    if "fallback" in best.method:
+        warnings.append("qna_split_used_fallback_method")
+
+    return {
+        "prepared_remarks": prepared_remarks,
+        "qna": qna,
+        "qna_detected": bool(qna),
+        "qna_start_offset": best.position,
+        "split_method": best.method,
+        "confidence": best.adjusted_confidence,
+        "matched_text": best.matched_text,
+        "position_ratio": best.position_ratio,
+        "warnings": warnings,
+        "candidates": [asdict(candidate) for candidate in candidates],
+    }
 
 
 def _safe_list(value: Any) -> list[dict[str, Any]]:
@@ -69,20 +372,20 @@ def combine_transcript_text(items: list[dict[str, Any]]) -> str:
 
 
 def split_transcript_sections(full_text: str) -> dict[str, Any]:
-    if not full_text:
-        return {"prepared_remarks": "", "qna": "", "qna_start_offset": None, "section_detection_warning": None}
-    match = QA_START_MARKERS.search(full_text)
-    if not match:
-        warning = "qna_mentioned_but_no_reliable_qna_start" if QA_MENTION_MARKERS.search(full_text) else None
-        return {"prepared_remarks": full_text, "qna": "", "qna_start_offset": None, "section_detection_warning": warning}
-    nearby = full_text[max(0, match.start() - 80) : match.end() + 120]
-    if FALSE_QA_INTRO_MARKERS.search(nearby):
-        return {"prepared_remarks": full_text, "qna": "", "qna_start_offset": None, "section_detection_warning": "qna_start_likely_false_positive"}
+    result = split_earnings_call_into_two_blocks(full_text)
+    warnings = list(result.get("warnings") or [])
+    section_detection_warning = warnings[0] if warnings else None
     return {
-        "prepared_remarks": full_text[: match.start()].strip(),
-        "qna": full_text[match.start() :].strip(),
-        "qna_start_offset": match.start(),
-        "section_detection_warning": None,
+        "prepared_remarks": result["prepared_remarks"],
+        "qna": result["qna"],
+        "qna_start_offset": result["qna_start_offset"],
+        "section_detection_warning": section_detection_warning,
+        "qna_split_method": result["split_method"],
+        "qna_split_confidence": result["confidence"],
+        "qna_split_matched_text": result["matched_text"],
+        "qna_split_position_ratio": result["position_ratio"],
+        "qna_split_warnings": warnings,
+        "qna_split_candidates": result["candidates"],
     }
 
 
@@ -135,7 +438,7 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
     char_count = len(full_text)
     qna_word_count = len(qna.split())
     has_text = char_count > 0
-    qna_detected = bool(QA_START_MARKERS.search(full_text))
+    qna_detected = bool(sections.get("qna_start_offset") is not None and qna.strip())
     operator_close_detected = bool(CLOSING_MARKERS.search(full_text))
     explicit_truncation_marker_detected = has_real_explicit_truncation_marker(full_text)
     ends_mid_sentence = transcript_ends_mid_sentence(full_text)
@@ -180,7 +483,7 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
         "full_transcript_complete": complete_with_warnings and operator_close_detected,
         "transcript_quality_status": "complete" if complete_with_warnings and operator_close_detected else ("usable_with_warnings" if complete_with_warnings else "incomplete"),
         "operator_intro_detected": bool(OPERATOR_MARKER.search(full_text)),
-        "operator_qna_start_detected": bool(QA_START_MARKERS.search(qna)) if qna else False,
+        "operator_qna_start_detected": bool(OPERATOR_MARKER.search(qna) or QA_START_MARKERS.search(qna)) if qna else False,
         "operator_close_detected": operator_close_detected,
         "explicit_truncation_marker_detected": explicit_truncation_marker_detected,
         "ends_mid_sentence": ends_mid_sentence,
@@ -211,7 +514,10 @@ def normalize_transcript_dates(raw_dates: Any, min_year: int = 2025, max_items: 
             "call_date": item.get("date") or item.get("callDate") or item.get("fillingDate"),
             "transcript_available": True,
             "source": "FMP earning-call-transcript-dates",
-            "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
+            "recommended_fetch_tools": [
+                "fmp_get_earnings_call_prepared_remarks",
+                "fmp_get_earnings_call_q_and_a",
+            ],
             "raw": item,
         })
     normalized.sort(key=lambda x: (x["year"], x["quarter"], str(x.get("call_date") or "")), reverse=True)
@@ -239,7 +545,7 @@ def financial_table_record(name: str, rows: Any, periods: list[dict[str, Any]], 
         "match_status": "exact_period_match" if matched else "no_exact_period_match",
         "fallback_rows": fallback_rows,
         "fallback_used": bool(fallback_rows),
-        "audit_note": "Exact rows matched to selected earnings-call periods." if matched else "No exact period match; do not treat fallback/latest rows as period-reviewed unless manually verified.",
+        "note": "Exact rows matched to selected earnings-call periods." if matched else "No exact period match; fallback/latest rows are included only as context and may need manual verification.",
     }
 
 
@@ -264,10 +570,10 @@ def annual_financial_table_record(name: str, rows: Any, fiscal_year: int | None)
         "match_status": "exact_fiscal_year_match" if matched else "no_exact_fiscal_year_match",
         "fallback_rows": [],
         "fallback_used": False,
-        "audit_note": (
+        "note": (
             f"Exact annual row matched for FY{fiscal_year}."
             if matched
-            else "No exact annual fiscal-year match; fetch annual statement tables and verify manually before scoring."
+            else "No exact annual fiscal-year match; annual statement tables may help with manual verification."
         ),
     }
 
@@ -298,19 +604,16 @@ def earnings_release_review_actions(symbol: str, selected_periods: list[dict[str
                 "fiscalYear": period["year"],
                 "fiscalQuarter": period["quarter"],
                 "filingDate": filing_date,
-                "includeHtml": False,
-                "includeTables": True,
             },
             "reason": (
-                "Fetch and read the official SEC EDGAR earnings release for this selected quarter before scoring. "
-                "Use release_json.text and release_json.tables, then mark official_release_reviewed=yes only after reading it."
+                "Suggested source for the official SEC EDGAR earnings release for this selected quarter. "
+                "The tool returns LLM-friendly text blocks and parsed tables for review."
             ),
-            "required_for_scoring": True,
-            "review_scope": "selected_quarter_official_earnings_release",
+            "retry_suggestion": OPENAI_RETRY_SUGGESTION,
+            "suggested_scope": "selected_quarter_official_earnings_release",
             "period_label": period["period_label"],
         })
     return actions
-
 
 def financial_statement_review_actions(symbol: str, selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     symbol = symbol.upper()
@@ -323,11 +626,10 @@ def financial_statement_review_actions(symbol: str, selected_periods: list[dict[
             "tool": "fmp_get_statement_tables",
             "arguments": {"symbol": symbol, "period": "annual", "limit": 3},
             "reason": (
-                "Review Income Statement, Balance Sheet and Cash Flow Statement "
-                f"for the latest completed fiscal year FY{latest_full_year} before scoring."
+                "Suggested statement-table context for the latest completed fiscal year "
+                f"FY{latest_full_year}."
             ),
-            "required_for_scoring": True,
-            "review_scope": "latest_completed_fiscal_year",
+            "suggested_scope": "latest_completed_fiscal_year",
             "fiscal_year_to_review": latest_full_year,
             "statements_to_review": statements_to_review,
         })
@@ -335,13 +637,9 @@ def financial_statement_review_actions(symbol: str, selected_periods: list[dict[
     if selected_periods:
         actions.append({
             "tool": "fmp_get_statement_tables",
-            "arguments": {"symbol": symbol, "period": "quarter", "limit": max(len(selected_periods), 8)},
-            "reason": (
-                "Review Income Statement, Balance Sheet and Cash Flow Statement "
-                "for each selected quarter before scoring."
-            ),
-            "required_for_scoring": True,
-            "review_scope": "selected_quarters",
+            "arguments": {"symbol": symbol, "period": "quarter", "limit": min(max(len(selected_periods), 1), 4)},
+            "reason": "Suggested statement-table context for the selected quarters.",
+            "suggested_scope": "selected_quarters",
             "periods_to_review": [p["period_label"] for p in selected_periods],
             "statements_to_review": statements_to_review,
         })
@@ -353,59 +651,28 @@ def financial_statement_review_actions(symbol: str, selected_periods: list[dict[
 def build_direct_review_policy(selected_periods: list[dict[str, Any]]) -> dict[str, Any]:
     period_labels = [str(p.get("period_label")) for p in selected_periods if p.get("period_label")]
     return {
-        "evidence_pack_is_not_direct_source_review": True,
-        "selected_periods_requiring_direct_review": period_labels,
-        "non_substitution_warning": (
-            "This evidence pack is a discovery and audit aid only. SEC filing candidates, filing links, "
-            "matched financial rows, annual rows, quarterly rows, metrics, ratios, and growth tables included "
-            "in this payload do not prove that the official earnings release or financial statements were read."
+        "purpose": "Optional source-review suggestions for analysts or LLM agents.",
+        "selected_periods": period_labels,
+        "suggested_sources": [
+            "prepared remarks",
+            "earnings-call Q&A",
+            "official SEC earnings release",
+            "income statement",
+            "balance sheet",
+            "cash flow statement",
+        ],
+        "note": (
+            "The MCP provides discovery context and suggested next actions only. "
+            "The analyst or LLM decides how to use the information."
         ),
-        "must_call_and_read_before_scoring": [
-            {
-                "source_type": "earnings_call_transcript",
-                "tool": "fmp_get_earnings_call_transcript",
-                "scope": "each selected quarter",
-                "review_flag_unlocked_only_after_reading": ["full_call_text_read", "qna_reviewed"],
-            },
-            {
-                "source_type": "official_sec_earnings_release",
-                "tool": "get_earnings_release_json",
-                "scope": "each selected quarter",
-                "review_flag_unlocked_only_after_reading": ["official_release_reviewed"],
-                "anti_shortcut_rule": (
-                    "Identifying an 8-K/6-K, Exhibit 99.1, SEC URL, filing candidate, or filing date is not enough. "
-                    "The agent must call get_earnings_release_json and read release_json.text and release_json.tables."
-                ),
-            },
-            {
-                "source_type": "financial_statements",
-                "tool": "fmp_get_statement_tables",
-                "scope": "latest completed fiscal year and each selected quarter",
-                "review_flag_unlocked_only_after_reading": [
-                    "financial_tables_reviewed",
-                    "income_statement_reviewed",
-                    "balance_sheet_reviewed",
-                    "cash_flow_statement_reviewed",
-                ],
-                "anti_shortcut_rule": (
-                    "Matched financial rows inside evidence_manifest are not a substitute for calling "
-                    "fmp_get_statement_tables and reviewing the income statement, balance sheet, and cash flow statement."
-                ),
-            },
-        ],
-        "forbidden_assumptions": [
-            "Do not mark official_release_reviewed=yes from evidence_manifest.sec_filings alone.",
-            "Do not mark financial_tables_reviewed=yes from evidence_manifest.financial_tables alone.",
-            "Do not mark statement-specific reviewed flags as yes from matched_rows or fallback_rows alone.",
-            "Do not score until all required recommended_next_actions have been called and read.",
-        ],
     }
 
-def build_source_audit_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_source_context_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
             "period_label": p["period_label"],
             "full_call_text_read": "no",
+            "prepared_remarks_reviewed": "no",
             "qna_reviewed": "no",
             "official_release_reviewed": "no",
             "financial_tables_reviewed": "no",
@@ -414,12 +681,12 @@ def build_source_audit_template(selected_periods: list[dict[str, Any]]) -> list[
     ]
 
 
-def build_financial_statement_audit_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    audit_rows: list[dict[str, Any]] = []
+def build_financial_statement_context_template(selected_periods: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    context_rows: list[dict[str, Any]] = []
     latest_full_year = latest_completed_fiscal_year(selected_periods)
 
     if latest_full_year is not None:
-        audit_rows.append({
+        context_rows.append({
             "period_label": f"FY{latest_full_year}",
             "review_scope": "latest_completed_fiscal_year",
             "income_statement_reviewed": "no",
@@ -428,7 +695,7 @@ def build_financial_statement_audit_template(selected_periods: list[dict[str, An
         })
 
     for p in selected_periods:
-        audit_rows.append({
+        context_rows.append({
             "period_label": p["period_label"],
             "review_scope": "selected_quarter",
             "income_statement_reviewed": "no",
@@ -436,7 +703,7 @@ def build_financial_statement_audit_template(selected_periods: list[dict[str, An
             "cash_flow_statement_reviewed": "no",
         })
 
-    return audit_rows
+    return context_rows
 
 
 def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
@@ -463,7 +730,7 @@ def prioritize_sec_filings(filings: Any) -> dict[str, Any]:
             "Non-core filings such as Form 4, SC 13G, S-8, proxies, and shelf/prospectus "
             "documents are omitted from the default evidence pack unless specifically relevant."
         ),
-        "audit_note": "Prioritize 8-K/6-K earnings-release exhibits, then 10-Q/10-K. Ignore Form 4/144/13G unless specifically relevant.",
+        "note": "Prioritize 8-K/6-K earnings-release exhibits, then 10-Q/10-K. Ignore Form 4/144/13G unless specifically relevant.",
     }
 
 
@@ -473,20 +740,20 @@ def build_transcript_payload(
     year: int,
     quarter: int,
     raw: Any,
-    section: TranscriptSection = "full",
+    section: TranscriptSection = "prepared_remarks",
     include_full_text: bool = True,
-    max_chars: int | None = DEFAULT_TRANSCRIPT_CHAR_BUDGET,
+    max_chars: int | None = None,
 ) -> dict[str, Any]:
     items = _safe_list(raw)
     full_text = combine_transcript_text(items)
     sections = split_transcript_sections(full_text)
+    normalized_section = "q_and_a" if section == "qna" else section
     selected_text = {
         "full": full_text,
         "prepared_remarks": sections["prepared_remarks"],
-        "qna": sections["qna"],
+        "q_and_a": sections["qna"],
         "metadata": "",
-    }[section]
-    content_truncated_by_tool = max_chars is not None and len(selected_text) > max_chars
+    }[normalized_section]
     if not include_full_text:
         returned_text = ""
     elif max_chars is None:
@@ -497,9 +764,9 @@ def build_transcript_payload(
     transcript_field = {
         "full": "transcript",
         "prepared_remarks": "prepared_remarks",
-        "qna": "qna",
+        "q_and_a": "q_and_a",
         "metadata": "transcript",
-    }[section]
+    }[normalized_section]
 
     payload: dict[str, Any] = {
         "symbol": symbol.upper(),
@@ -507,31 +774,42 @@ def build_transcript_payload(
         "quarter": quarter,
         "source_name": "FMP earning-call-transcript",
         "transcript_available": bool(items and full_text),
-        "content_truncated_by_tool": content_truncated_by_tool,
         transcript_field: returned_text,
         "completeness": assessment,
-        "recommended_next_actions": transcript_next_actions(symbol.upper(), year, quarter, section, content_truncated_by_tool, assessment),
+        "recommended_next_actions": transcript_next_actions(symbol.upper(), year, quarter, normalized_section, assessment),
+        "related_transcript_tools": [
+            "fmp_get_earnings_call_prepared_remarks",
+            "fmp_get_earnings_call_q_and_a",
+        ],
     }
 
-    if section != "full":
-        payload["section"] = section
+    if normalized_section != "full":
+        payload["section"] = normalized_section
 
     return payload
 
 
-def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, truncated: bool, assessment: dict[str, Any]) -> list[dict[str, Any]]:
-    actions = []
-    if truncated and section == "full":
+def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, assessment: dict[str, Any]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    paired_tool = (
+        "fmp_get_earnings_call_q_and_a"
+        if section == "prepared_remarks"
+        else "fmp_get_earnings_call_prepared_remarks"
+        if section == "q_and_a"
+        else None
+    )
+    if paired_tool:
         actions.append({
-            "tool": "fmp_get_earnings_call_transcript",
+            "tool": paired_tool,
             "arguments": {"symbol": symbol, "year": year, "quarter": quarter},
-            "reason": "Fetch and review the complete transcript. The public tool input does not expose section or max_chars controls.",
+            "reason": "Suggested paired earnings-call tool for additional transcript context.",
+            "retry_suggestion": OPENAI_RETRY_SUGGESTION,
         })
     if assessment.get("transcript_quality_status") == "incomplete":
         actions.append({
             "tool": "fmp_list_transcript_dates",
             "arguments": {"symbol": symbol, "min_year": max(2000, year - 1), "limit": 4},
-            "reason": "Confirm the period exists and check adjacent periods before treating the transcript as unavailable or incomplete.",
+            "reason": "Confirm the period exists and check adjacent periods for additional context.",
         })
     return actions
 
@@ -567,10 +845,20 @@ async def build_evidence_pack(
             "quarter": period["quarter"],
             "period_label": period["period_label"],
             "transcript_available": True,
+            "prepared_remarks_included": False,
+            "q_and_a_included": False,
             "full_call_text_included": False,
+            "prepared_remarks_read_by_agent": False,
+            "q_and_a_read_by_agent": False,
             "full_call_text_read_by_agent": False,
-            "recommended_fetch_tool": "fmp_get_earnings_call_transcript",
-            "content_policy_note": "Transcript text is intentionally not embedded in the evidence pack; use the recommended action to fetch the complete call.",
+            "recommended_fetch_tools": [
+                "fmp_get_earnings_call_prepared_remarks",
+                "fmp_get_earnings_call_q_and_a",
+            ],
+            "content_policy_note": (
+                "Transcript text is intentionally not embedded in the evidence pack; use both "
+                "earnings-call recommended actions to fetch prepared remarks and Q&A."
+            ),
         })
 
     financial_tables = [
@@ -587,25 +875,34 @@ async def build_evidence_pack(
         annual_financial_table_record("cash_flow_statement", annual_cash, latest_full_year),
     ]
 
-    blocking_items = []
+    context_notes = []
     if len(selected_periods) < requested_calls:
-        blocking_items.append("fewer_transcript_periods_found_than_requested")
-    if strict_report_workflow:
-        blocking_items.append("agent_must_fetch_and_read_each_selected_transcript_before_scoring")
-        blocking_items.append("agent_must_fetch_and_read_official_earnings_release_for_each_selected_period_before_scoring")
-        blocking_items.append("agent_must_review_statement_tables_for_latest_completed_fiscal_year_and_selected_quarters_before_scoring")
+        context_notes.append("fewer_transcript_periods_found_than_requested")
 
-    transcript_actions = [
-        {
-            "tool": "fmp_get_earnings_call_transcript",
-            "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"]},
-            "reason": "Fetch and read the complete transcript before scoring.",
-            "required_for_scoring": True,
-            "review_scope": "selected_quarter_transcript",
-            "period_label": p["period_label"],
-        }
-        for p in selected_periods
-    ]
+    transcript_actions = []
+    for p in selected_periods:
+        transcript_actions.extend([
+            {
+                "tool": "fmp_get_earnings_call_prepared_remarks",
+                "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"]},
+                "reason": (
+                    "Suggested source for the start of the earnings call / prepared remarks for this selected quarter."
+                ),
+                "retry_suggestion": OPENAI_RETRY_SUGGESTION,
+                "suggested_scope": "selected_quarter_prepared_remarks",
+                "period_label": p["period_label"],
+            },
+            {
+                "tool": "fmp_get_earnings_call_q_and_a",
+                "arguments": {"symbol": symbol_upper, "year": p["year"], "quarter": p["quarter"]},
+                "reason": (
+                    "Suggested source for the earnings-call Q&A for this selected quarter."
+                ),
+                "retry_suggestion": OPENAI_RETRY_SUGGESTION,
+                "suggested_scope": "selected_quarter_q_and_a",
+                "period_label": p["period_label"],
+            },
+        ])
     release_actions = earnings_release_review_actions(symbol_upper, selected_periods)
     statement_actions = financial_statement_review_actions(symbol_upper, selected_periods)
 
@@ -618,17 +915,8 @@ async def build_evidence_pack(
             "transcripts": transcript_statuses,
             "financial_tables": financial_tables,
             "annual_financial_tables": annual_financial_tables,
-            "sec_filings": prioritize_sec_filings(filings),
         },
-        "source_audit_template": build_source_audit_template(selected_periods),
-        "required_source_flags": REQUIRED_SOURCE_FLAGS,
-        "financial_statement_audit_template": build_financial_statement_audit_template(selected_periods),
-        "mandatory_direct_review_policy": build_direct_review_policy(selected_periods),
-        "scoring_readiness": {
-            "allowed": not strict_report_workflow and not blocking_items,
-            "blocking_items": blocking_items,
-            "strict_report_workflow": strict_report_workflow,
-        },
+        "context_notes": context_notes,
         "recommended_next_actions": transcript_actions + release_actions + statement_actions,
     }
 
@@ -645,36 +933,14 @@ async def _fetch_financials(client: Any, symbol: str, limit: int, period: Litera
 
 
 def validate_evidence_payload(evidence_pack: dict[str, Any]) -> dict[str, Any]:
-    blocking = list(evidence_pack.get("scoring_readiness", {}).get("blocking_items", []))
     periods = evidence_pack.get("selected_periods") or []
+    notes: list[str] = []
     if not periods:
-        blocking.append("no_selected_periods")
-
-    audit_rows = evidence_pack.get("source_audit_template") or []
-    for row in audit_rows:
-        period_label = row.get("period_label")
-        if row.get("full_call_text_read") != "yes":
-            blocking.append(f"full_call_text_not_read:{period_label}")
-        if row.get("qna_reviewed") != "yes":
-            blocking.append(f"qna_not_reviewed:{period_label}")
-        if row.get("official_release_reviewed") != "yes":
-            blocking.append(f"official_release_not_reviewed:{period_label}")
-        if row.get("financial_tables_reviewed") != "yes":
-            blocking.append(f"financial_tables_not_reviewed:{period_label}")
-
-    financial_audit_rows = evidence_pack.get("financial_statement_audit_template") or []
-    for row in financial_audit_rows:
-        period_label = row.get("period_label")
-        if row.get("income_statement_reviewed") != "yes":
-            blocking.append(f"income_statement_not_reviewed:{period_label}")
-        if row.get("balance_sheet_reviewed") != "yes":
-            blocking.append(f"balance_sheet_not_reviewed:{period_label}")
-        if row.get("cash_flow_statement_reviewed") != "yes":
-            blocking.append(f"cash_flow_statement_not_reviewed:{period_label}")
+        notes.append("no_selected_periods")
 
     return {
         "evidence_pack_version": evidence_pack.get("evidence_pack_version"),
-        "allowed": not blocking,
-        "blocking_items": sorted(set(blocking)),
+        "status": "informational_review_only",
+        "notes": sorted(set(notes)),
         "recommended_next_actions": evidence_pack.get("recommended_next_actions", []),
     }

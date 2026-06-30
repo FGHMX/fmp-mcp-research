@@ -1,101 +1,38 @@
-# FMP MCP Research Server
+# FMP MCP Research
 
-Remote MCP server for ChatGPT or another LLM that exposes read-only Financial Modeling Prep tools for professional buy-side earnings-call research workflows.
+Read-only MCP server for FMP and SEC research context. The server behaves as an information and suggestion layer: it returns source context, selected periods, tables, filings where requested, and `recommended_next_actions` without enforcing gates, restrictions, or blocking logic.
 
-The server does **not** generate final investment recommendations. It builds evidence manifests, returns transcript completeness metadata, finds filings/tables, and helps an analyst or LLM decide whether a scorecard is supported by the evidence.
-
-## Version 0.3.3 changes
-
-- Added `get_earnings_release_json(symbol, fiscalYear, fiscalQuarter, filingDate, includeHtml=false, includeTables=true)`.
-- Added a read-only SEC EDGAR client that maps ticker to CIK, fetches company submissions, selects the likely 8-K/6-K earnings-release exhibit, and converts the SEC document into LLM-friendly JSON.
-- Added `release_json.text`, `release_json.blocks`, and optional `release_json.tables`; raw HTML is returned only when `includeHtml=true`.
-- Updated `fmp_build_research_evidence_pack` so `recommended_next_actions` force a SEC earnings-release read for every selected quarter, normally the two requested quarters.
-- Updated strict scoring blockers to require reading the official SEC earnings release for each selected period.
-- Bumped package, contract, and evidence-pack versions to `0.3.3`.
-
-## Version 0.3.2 changes
-
-- Added explicit MCP `ToolAnnotations` for every exposed action: `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`, and `openWorldHint=false`.
-- Added human-readable tool titles and “Use this when...” descriptions so ChatGPT can classify the actions safely.
-- Added stricter public input validation for ticker symbols and ISO date ranges.
-- Added a contract test that fails if any tool is missing safe read-only annotations.
-- Removed public `include_transcript_text` and `max_transcript_chars` inputs from `fmp_build_research_evidence_pack`.
-- Kept evidence packs as manifests only: transcript text is not embedded; the required transcript fetches appear in `recommended_next_actions`.
-- Removed public `section` and `max_chars` inputs from `fmp_get_earnings_call_transcript`.
-- Made `fmp_get_earnings_call_transcript` return the complete transcript supplied by FMP for the requested symbol/year/quarter.
-- Updated transcript-related recommended actions so they pass only `symbol`, `year`, and `quarter`.
-
-## Tools exposed
+## Tools
 
 | Tool | Purpose |
-|---|---|
-| `fmp_get_company_profile` | Get sector, industry, market cap and descriptive metadata. |
-| `fmp_list_transcript_dates` | Discover available earnings-call transcript periods. |
-| `fmp_get_earnings_call_transcript` | Fetch the complete transcript for a selected earnings-call period. |
-| `fmp_get_statement_tables` | Fetch income statement, balance sheet, cash flow, key metrics, ratios and growth. |
-| `fmp_search_sec_filings` | Find and prioritize 8-K/6-K earnings releases plus 10-Q/10-K evidence. |
-| `fmp_get_earnings_calendar` | Confirm earnings dates and EPS actual/estimate context. |
-| `get_earnings_release_json` | Fetch the official SEC EDGAR earnings release and convert it to LLM-friendly JSON. |
-| `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, audit template and next actions. |
-| `fmp_validate_research_evidence` | Mechanically validate an evidence-pack payload. |
-| `research_report_contract` | Return report sections, audit fields and score dimensions. |
+| --- | --- |
+| `fmp_get_company_profile` | Return company profile and metadata. |
+| `fmp_list_transcript_dates` | Discover available earnings-call periods and suggested transcript fetch actions. |
+| `fmp_get_earnings_call_prepared_remarks` | Return prepared remarks / call-start text for a selected period. |
+| `fmp_get_earnings_call_q_and_a` | Return Q&A text for a selected period. |
+| `fmp_get_statement_tables` | Return income statement, balance sheet, cash flow, metrics, ratios and growth tables. |
+| `fmp_search_sec_filings` | Return SEC filing candidates from FMP. |
+| `get_earnings_release_json` | Fetch a likely SEC earnings-release exhibit and convert it into JSON text/tables. |
+| `fmp_get_earnings_calendar` | Return earnings calendar data. |
+| `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, context notes and recommended next actions. |
+| `fmp_build_research_pack` | Compatibility alias for the evidence-pack tool. |
+| `fmp_validate_research_evidence` | Return informational notes and recommended next actions from a payload. |
+| `research_report_contract` | Return suggested report structure and sector lenses. |
 
-## Recommended workflow
+## Evidence-pack behavior
 
-1. Call `research_report_contract(sector="healthcare_technology")` or the relevant sector.
-2. Call `fmp_build_research_evidence_pack(symbol="PSNL", min_year=2025, requested_calls=2)`.
-3. Read `selected_periods`, `evidence_manifest`, `scoring_readiness` and `recommended_next_actions`.
-4. For every selected period, call `fmp_get_earnings_call_transcript(symbol, year, quarter)`.
-5. Mark `full_call_text_read=yes` and `qna_reviewed=yes` only after actually reading the returned transcript.
-6. For every selected period, call `get_earnings_release_json(symbol, fiscalYear, fiscalQuarter, filingDate, includeHtml=false, includeTables=true)` and read `release_json.text` plus `release_json.tables`.
-7. Use `fmp_search_sec_filings` as supplementary filing discovery when needed.
-8. Use `fmp_get_statement_tables(period="annual")` to review Income Statement, Balance Sheet and Cash Flow Statement for the latest completed fiscal year.
-9. Use `fmp_get_statement_tables(period="quarter")` to review Income Statement, Balance Sheet and Cash Flow Statement for every selected quarter.
-10. Use key metrics, ratios and growth tables as supporting context, not as a substitute for primary statements.
-11. Complete both `source_audit_template` and `financial_statement_audit_template` before producing a scorecard.
+`fmp_build_research_evidence_pack` returns:
 
-## OpenAI-friendly tool design
+- `evidence_pack_version`
+- `symbol`
+- `selected_periods`
+- `latest_completed_fiscal_year`
+- `evidence_manifest`
+- `context_notes`
+- `recommended_next_actions`
 
-- Evidence packs do not return bulk transcript text.
-- Transcript text is fetched only through the dedicated transcript tool.
-- The transcript tool schema avoids large-content controls such as user-provided maximum character counts.
-- Recommended transcript actions use a small, fixed argument shape: `symbol`, `year`, and `quarter`.
-- Recommended SEC release actions use the explicit camel-case shape requested by the MCP contract: `symbol`, `fiscalYear`, `fiscalQuarter`, `filingDate`, `includeHtml`, and `includeTables`.
-- Count-style inputs use bounded defaults and server-side clamps to avoid oversized tool calls.
-- The server remains read-only and does not expose tools that generate final investment recommendations.
-- Every exposed MCP tool declares safety annotations so ChatGPT should not conservatively classify it as write/destructive when metadata is refreshed.
+The evidence-pack output omits strict templates, policies, source flags, gates and embedded SEC filing prioritization. Use `fmp_search_sec_filings` separately when filing discovery is needed.
 
-## Local development
+## Philosophy
 
-```bash
-cp .env.example .env
-# edit .env and set FMP_API_KEY
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-pytest
-python -m fmp_mcp_research.server
-```
-
-The MCP endpoint is usually available at:
-
-```text
-http://localhost:8000/mcp
-```
-
-## Docker
-
-```bash
-cp .env.example .env
-# edit .env and set FMP_API_KEY
-docker compose up --build
-```
-
-## Security guardrails
-
-- All MCP tools are annotated as read-only, non-destructive, idempotent, and non-open-world. The server does make server-side requests to FMP for public market data, but it does not publish content, write to external systems, modify user accounts, trade, send notifications, or mutate any data.
-- Keep `FMP_API_KEY` server-side only.
-- Do not expose write tools.
-- Do not add a tool that generates final investment recommendations.
-- Log tool name, symbol, quarter and source coverage status; do not log API keys.
-- Add rate limiting and an auth layer if used by multiple analysts or exposed outside a trusted network.
+The MCP provides information and suggestions only. It does not tell the LLM what it is allowed to conclude, does not block downstream work, and does not enforce downstream decision rules.

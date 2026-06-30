@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .evidence import (
+    OPENAI_RETRY_SUGGESTION,
     build_evidence_pack,
     build_transcript_payload,
     normalize_transcript_dates,
@@ -65,7 +66,7 @@ RequestedCalls = Annotated[
     ),
 ]
 StatementLimit = Annotated[
-    int, Field(ge=1, le=12, description="Number of statement rows to request.")
+    int, Field(ge=1, le=4, description="Number of statement rows to request, capped at 4 for context safety.")
 ]
 FilingLimit = Annotated[
     int, Field(ge=1, le=50, description="Number of SEC filing rows to request.")
@@ -140,38 +141,57 @@ async def fmp_list_transcript_dates(
         "requested_calls": limit,
         "available_calls": selected,
         "selected_periods": selected,
-        "recommended_next_action": (
-            {
-                "tool": "fmp_get_earnings_call_transcript",
-                "arguments_template": {
-                    "symbol": clean_symbol,
-                    "year": "",
-                    "quarter": "",
+        "recommended_next_actions": (
+            [
+                {
+                    "tool": "fmp_get_earnings_call_prepared_remarks",
+                    "arguments_template": {
+                        "symbol": clean_symbol,
+                        "year": "",
+                        "quarter": "",
+                    },
+                    "reason": "Suggested source for the start/prepared remarks for each selected period.",
+                    "retry_suggestion": OPENAI_RETRY_SUGGESTION,
                 },
-                "reason": "Fetch each selected period with the canonical complete-transcript tool before scoring.",
-            }
+                {
+                    "tool": "fmp_get_earnings_call_q_and_a",
+                    "arguments_template": {
+                        "symbol": clean_symbol,
+                        "year": "",
+                        "quarter": "",
+                    },
+                    "reason": "Suggested source for the Q&A for each selected period.",
+                    "retry_suggestion": OPENAI_RETRY_SUGGESTION,
+                },
+            ]
             if selected
-            else {
-                "tool": "fmp_list_transcript_dates",
-                "arguments": {"symbol": clean_symbol, "min_year": min_year - 1, "limit": limit},
-                "reason": "No transcript periods found at or after min_year. Widen the year filter before concluding no EC is available.",
-            }
+            else [
+                {
+                    "tool": "fmp_list_transcript_dates",
+                    "arguments": {"symbol": clean_symbol, "min_year": min_year - 1, "limit": limit},
+                    "reason": "No transcript periods found at or after min_year. You may widen the year filter for additional context.",
+                }
+            ]
         ),
         "raw": raw,
     }
 
 
 @mcp.tool(
-    title="Get earnings-call transcript",
-    description="Use this for read-only FMP earnings-call summary workflows for one known symbol, fiscal year, and quarter. The LLM should use the transcript source material to produce concise summaries or verification context, not to reproduce complete transcript content. It is not investment advice, not a recommendation, not a financial analysis, and not an instruction to buy, sell, or hold any security. The tool does not modify any data.",
+    title="Get earnings-call prepared remarks",
+    description=(
+        "Use this for read-only FMP earnings-call workflows when the user needs the start "
+        "of a selected earnings call / prepared remarks without Q&A. The paired Q&A tool can add context "
+        "for the same symbol, year, and quarter. If the host rejects or drops the call, a retry may be useful."
+    ),
     annotations=READ_ONLY_SAFE,
 )
-async def fmp_get_earnings_call_transcript(
+async def fmp_get_earnings_call_prepared_remarks(
     symbol: Symbol,
     year: FiscalYear,
     quarter: FiscalQuarter,
 ) -> dict[str, Any]:
-    """Fetch one complete earnings-call transcript with completeness metadata."""
+    """Fetch the start/prepared remarks portion of one earnings-call transcript."""
     clean_symbol = _clean_symbol(symbol)
     data = await FMPClient().transcript(symbol=clean_symbol, year=year, quarter=quarter)
     payload = build_transcript_payload(
@@ -179,14 +199,48 @@ async def fmp_get_earnings_call_transcript(
         year=year,
         quarter=quarter,
         raw=data,
-        section="full",
+        section="prepared_remarks",
         include_full_text=True,
         max_chars=None,
     )
     payload["raw_data"] = None
-    payload["audit_note"] = (
-        "Use the returned transcript field as source material for concise summaries and verification context only. "
-        "Do not reproduce the transcript verbatim. If completeness warnings are present, verify the source before scoring."
+    payload["note"] = (
+        "This tool returns only the earnings-call start/prepared remarks. The paired Q&A tool can provide additional context for the same period. "
+        f"{OPENAI_RETRY_SUGGESTION}"
+    )
+    return payload
+
+
+@mcp.tool(
+    title="Get earnings-call Q&A",
+    description=(
+        "Use this for read-only FMP earnings-call workflows when the user needs only the Q&A "
+        "portion of a selected earnings call. The paired prepared-remarks tool can add context "
+        "for the same symbol, year, and quarter. If the host rejects or drops the call, a retry may be useful."
+    ),
+    annotations=READ_ONLY_SAFE,
+)
+async def fmp_get_earnings_call_q_and_a(
+    symbol: Symbol,
+    year: FiscalYear,
+    quarter: FiscalQuarter,
+) -> dict[str, Any]:
+    """Fetch the Q&A portion of one earnings-call transcript."""
+    clean_symbol = _clean_symbol(symbol)
+    data = await FMPClient().transcript(symbol=clean_symbol, year=year, quarter=quarter)
+    payload = build_transcript_payload(
+        symbol=clean_symbol,
+        year=year,
+        quarter=quarter,
+        raw=data,
+        section="q_and_a",
+        include_full_text=True,
+        max_chars=None,
+    )
+    payload["raw_data"] = None
+    payload["note"] = (
+        "This tool returns only the earnings-call Q&A. The paired prepared-remarks tool can provide additional context for the same period. "
+        f"{OPENAI_RETRY_SUGGESTION}"
     )
     return payload
 
@@ -197,11 +251,11 @@ async def fmp_get_earnings_call_transcript(
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_statement_tables(
-    symbol: Symbol, period: Literal["quarter", "annual"] = "quarter", limit: StatementLimit = 8
+    symbol: Symbol, period: Literal["quarter", "annual"] = "quarter", limit: StatementLimit = 4
 ) -> dict[str, Any]:
     """Fetch statement tables. Use period='annual' for latest completed fiscal year review and period='quarter' for selected-quarter review."""
     clean_symbol = _clean_symbol(symbol)
-    limit = _clamp(limit, minimum=1, maximum=12)
+    limit = _clamp(limit, minimum=1, maximum=4)
     client = FMPClient()
     return {
         "symbol": clean_symbol,
@@ -212,14 +266,14 @@ async def fmp_get_statement_tables(
         "key_metrics": await client.key_metrics(clean_symbol, period, limit),
         "ratios": await client.ratios(clean_symbol, period, limit),
         "financial_growth": await client.financial_growth(clean_symbol, period, limit),
-        "primary_statements_for_required_review": [
+        "primary_statement_tables": [
             "income_statement",
             "balance_sheet",
             "cash_flow_statement",
         ],
-        "audit_note": (
-            "Use income_statement, balance_sheet and cash_flow_statement for required financial-statement review. "
-            "Use key_metrics, ratios and financial_growth as supporting context only. These FMP financial tables do not replace official earnings releases or filings when the report requires them."
+        "note": (
+            "Income statement, balance sheet and cash flow statement are primary statement tables. "
+            "Key metrics, ratios and financial growth are supporting context."
         ),
     }
 
@@ -248,13 +302,20 @@ async def fmp_search_sec_filings(
         "source_name": "FMP sec-filings-search/symbol",
         "prioritized": prioritize_sec_filings(raw) if prioritize_for_report else None,
         "data": raw,
-        "audit_note": "The MCP identifies candidate filings; the agent must open and read the actual filing before marking it reviewed.",
+        "note": "The MCP identifies candidate filings and returns the raw filing-search data for context.",
     }
 
 
 @mcp.tool(
     title="Get SEC earnings release JSON",
-    description="Use this when the user must read the official SEC EDGAR earnings release for one selected fiscal quarter. Fetches the likely 8-K/6-K earnings-release exhibit from SEC EDGAR and converts it into LLM-friendly JSON with text blocks and optional tables/HTML. Read-only; does not submit, publish, trade, or mutate data.",
+    description=(
+        "Use this when the user wants official SEC EDGAR earnings-release context for one "
+        "selected fiscal quarter. Fetches the likely 8-K/6-K earnings-release exhibit from "
+        "SEC EDGAR and converts it into LLM-friendly JSON with text blocks and parsed tables. "
+        "Raw HTML is never returned and tables are always included. If the host rejects or drops "
+        "the call, a retry may be useful. "
+        "Read-only; does not submit, publish, trade, or mutate data."
+    ),
     annotations=READ_ONLY_SAFE,
 )
 async def get_earnings_release_json(
@@ -262,22 +323,20 @@ async def get_earnings_release_json(
     fiscalYear: FiscalYear,
     fiscalQuarter: FiscalQuarter,
     filingDate: ISODateString,
-    includeHtml: bool = False,
-    includeTables: bool = True,
 ) -> dict[str, Any]:
     """Fetch an official SEC EDGAR earnings release and convert it to LLM-friendly JSON."""
     clean_symbol = _clean_symbol(symbol)
     clean_filing_date = _validate_iso_date(filingDate, field_name="filingDate")
     if clean_filing_date is None:
         raise ValueError("filingDate is required")
-    return await SECClient().get_earnings_release_json(
+    payload = await SECClient().get_earnings_release_json(
         symbol=clean_symbol,
         fiscal_year=fiscalYear,
         fiscal_quarter=fiscalQuarter,
         filing_date=clean_filing_date,
-        include_html=includeHtml,
-        include_tables=includeTables,
     )
+    payload["retry_suggestion"] = OPENAI_RETRY_SUGGESTION
+    return payload
 
 
 @mcp.tool(
@@ -310,7 +369,7 @@ async def fmp_build_research_evidence_pack(
     symbol: Symbol,
     min_year: MinYear = 2025,
     requested_calls: RequestedCalls = 2,
-    strict_report_workflow: bool = True,
+    strict_report_workflow: bool = False,
 ) -> dict[str, Any]:
     """Build a report evidence manifest with selected periods, source status, tables, filings and next actions; transcript text is not embedded."""
     clean_symbol = _clean_symbol(symbol)
@@ -324,24 +383,46 @@ async def fmp_build_research_evidence_pack(
 
 
 @mcp.tool(
+    title="Build research pack",
+    description="Compatibility alias for fmp_build_research_evidence_pack. Builds selected periods, evidence manifest and recommended next actions without embedding transcript text.",
+    annotations=READ_ONLY_SAFE,
+)
+async def fmp_build_research_pack(
+    symbol: Symbol,
+    min_year: MinYear = 2025,
+    requested_calls: RequestedCalls = 2,
+    strict_report_workflow: bool = False,
+) -> dict[str, Any]:
+    """Build a report evidence manifest through the shorter fmp_build_research_pack tool name."""
+    clean_symbol = _clean_symbol(symbol)
+    requested_calls = _clamp(requested_calls, minimum=1, maximum=4)
+    return await build_evidence_pack(
+        symbol=clean_symbol,
+        min_year=min_year,
+        requested_calls=requested_calls,
+        strict_report_workflow=strict_report_workflow,
+    )
+
+
+@mcp.tool(
     title="Validate research evidence",
-    description="Use this when the user needs a local, read-only mechanical validation of an evidence-pack payload. Does not call external APIs and does not modify the payload.",
+    description="Use this when the user needs a local, read-only informational review of an evidence-pack payload. Does not call external APIs and does not modify the payload.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[str, Any]:
-    """Validate an evidence-pack payload mechanically and return blocking items / next actions."""
+    """Review an evidence-pack payload informationally and return notes / next actions."""
     return validate_evidence_payload(evidence_pack)
 
 
 @mcp.tool(
     title="Get research report contract",
-    description="Use this when the user needs the local, read-only report contract: required sections, source-audit fields, score dimensions, and sector overlays. Does not call external APIs.",
+    description="Use this when the user needs local, read-only report structure suggestions and sector overlays. Does not call external APIs.",
     annotations=READ_ONLY_SAFE,
 )
 async def research_report_contract(
     sector: Literal["pharma", "healthcare_technology", "general"] = "healthcare_technology",
 ) -> dict[str, object]:
-    """Return required report sections, source-audit fields, score dimensions and sector overlays."""
+    """Return suggested report sections and sector overlays."""
     return build_report_contract(sector)
 
 

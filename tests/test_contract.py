@@ -1,9 +1,9 @@
 from fmp_mcp_research.report_contract import build_report_contract
 
 
-def test_contract_has_version_and_core_fields():
+def test_contract_returns_suggestions_only():
     contract = build_report_contract("healthcare_technology")
-    assert contract["contract_version"] == "0.3.3"
-    assert "source_coverage_audit" in contract["required_sections"]
-    assert "full_call_text_read" in contract["required_source_audit_fields"]
-    assert contract["sector_overlay"] == "healthcare_technology"
+    assert contract["mode"] == "informational_suggestions_only"
+    assert "suggested_sections" in contract
+    assert "suggested_source_context_fields" in contract
+    assert "note" in contract

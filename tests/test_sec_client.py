@@ -11,7 +11,7 @@ def test_html_to_llm_json_extracts_text_blocks_and_tables():
     """
     payload = html_to_llm_json(html, include_html=False, include_tables=True)
     assert "Company Reports First Quarter Results" in payload["text"]
-    assert payload["html"] is None
+    assert "html" not in payload
     assert payload["table_count"] == 1
     assert payload["tables"][0]["rows"] == [["Metric", "Q1"], ["Revenue", "$10"]]
     assert payload["blocks"][0]["type"] == "heading"

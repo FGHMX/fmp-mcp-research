@@ -1,51 +1,28 @@
 from __future__ import annotations
 
-CONTRACT_VERSION = "0.3.3"
+CONTRACT_VERSION = "0.3.4"
 
-REPORT_OUTPUT_SECTIONS = [
+SUGGESTED_REPORT_OUTPUT_SECTIONS = [
     "company_snapshot",
     "selected_periods",
-    "source_coverage_audit",
+    "source_context",
     "earnings_call_summary_by_period",
     "financial_tables_review",
-    "official_filings_review",
-    "catalyst_scorecard",
-    "blocking_items_and_limitations",
+    "official_filings_context",
+    "catalysts_and_risks",
+    "limitations",
 ]
 
-REQUIRED_SOURCE_FLAGS = [
+SUGGESTED_SOURCE_CONTEXT_FIELDS = [
     "transcript_period_selected",
-    "full_call_text_returned",
-    "full_call_text_read",
-    "prepared_remarks_reviewed",
+    "prepared_remarks_available",
     "qna_available",
-    "qna_reviewed",
     "official_release_candidate_found",
-    "official_release_reviewed",
     "financial_tables_matched_to_period",
-    "financial_tables_reviewed",
-    "income_statement_reviewed",
-    "balance_sheet_reviewed",
-    "cash_flow_statement_reviewed",
-    "latest_completed_fiscal_year_reviewed",
-    "scorecard_allowed",
-]
-
-CORE_SCORE_DIMENSIONS = [
-    "revenue_growth_quality",
-    "margin_and_cash_flow_progression",
-    "guidance_revision_or_reiteration",
-    "pipeline_or_product_momentum",
-    "management_tone_and_execution",
-    "balance_sheet_and_liquidity",
-]
-
-SECONDARY_SCORE_DIMENSIONS = [
-    "analyst_qna_concerns",
-    "competitive_positioning",
-    "regulatory_or_reimbursement_risk",
-    "customer_adoption_or_retention",
-    "near_term_catalyst_density",
+    "income_statement_available",
+    "balance_sheet_available",
+    "cash_flow_statement_available",
+    "latest_completed_fiscal_year_available",
 ]
 
 PHARMA_LENSES = [
@@ -76,28 +53,19 @@ def build_report_contract(sector: str = "healthcare_technology") -> dict[str, ob
 
     return {
         "contract_version": CONTRACT_VERSION,
-        "strictness": "professional_not_overly_strict",
-        "required_sections": REPORT_OUTPUT_SECTIONS,
-        "required_source_audit_fields": REQUIRED_SOURCE_FLAGS,
-        "core_score_dimensions": CORE_SCORE_DIMENSIONS,
-        "secondary_score_dimensions": SECONDARY_SCORE_DIMENSIONS,
+        "mode": "informational_suggestions_only",
+        "suggested_sections": SUGGESTED_REPORT_OUTPUT_SECTIONS,
+        "suggested_source_context_fields": SUGGESTED_SOURCE_CONTEXT_FIELDS,
         "sector_overlay": overlay_name,
-        "sector_lens_scores_diagnostic_only": lenses,
-        "workflow_contract": {
-            "evidence_pack_is_orchestrator_not_final_review": True,
-            "canonical_transcript_fetch_tool": "fmp_get_earnings_call_transcript",
-            "canonical_statement_tables_tool": "fmp_get_statement_tables",
-            "canonical_sec_earnings_release_tool": "get_earnings_release_json",
-            "must_fetch_transcript_for_each_selected_period": True,
-            "must_read_prepared_remarks_and_qna_before_scoring": True,
-            "must_fetch_and_read_official_earnings_release_for_each_selected_period": True,
-            "must_review_official_release_and_financial_tables_separately": True,
-            "must_review_income_statement_balance_sheet_and_cash_flow": True,
-            "must_review_latest_completed_fiscal_year_and_selected_quarters": True,
-            "qna_split_uncertain_is_warning_not_automatic_blocker": True,
+        "sector_lens_suggestions": lenses,
+        "workflow_suggestions": {
+            "evidence_pack_is_context_provider": True,
+            "transcript_tools": [
+                "fmp_get_earnings_call_prepared_remarks",
+                "fmp_get_earnings_call_q_and_a",
+            ],
+            "statement_tables_tool": "fmp_get_statement_tables",
+            "sec_earnings_release_tool": "get_earnings_release_json",
         },
-        "scoring_guardrail": (
-            "Do not produce a scorecard until the coverage audit confirms the required "
-            "sources have been returned and reviewed. If evidence is partial, disclose the limitation."
-        ),
+        "note": "The MCP returns information and suggestions only; the analyst or LLM decides how to use them.",
     }

@@ -221,9 +221,6 @@ def html_to_llm_json(raw_html: str, *, include_html: bool = False, include_table
     if include_html:
         payload["html"] = raw_html
         payload["html_character_count"] = len(raw_html)
-    else:
-        payload["html"] = None
-        payload["html_character_count"] = len(raw_html)
     return payload
 
 
@@ -234,7 +231,7 @@ class SECClient:
         self.timeout = float(os.getenv("SEC_TIMEOUT_SECONDS", os.getenv("FMP_TIMEOUT_SECONDS", "30")))
         self.user_agent = os.getenv(
             "SEC_USER_AGENT",
-            "fmp-mcp-research/0.3.3 contact@example.com",
+            "fmp-mcp-research/0.3.4 contact@example.com",
         )
         self.max_supplemental_files = int(os.getenv("SEC_MAX_SUPPLEMENTAL_SUBMISSION_FILES", "3"))
 
@@ -308,8 +305,6 @@ class SECClient:
         fiscal_year: int,
         fiscal_quarter: int,
         filing_date: str,
-        include_html: bool = False,
-        include_tables: bool = True,
     ) -> dict[str, Any]:
         mapping = await self.cik_for_symbol(symbol)
         cik = mapping["cik"]
@@ -331,27 +326,20 @@ class SECClient:
             )
 
         index_json = await self._filing_index(cik_int, candidate["accessionNumber"])
-        document, document_url, raw_html = await self._select_best_document_with_content(
+        document, _document_url, raw_html = await self._select_best_document_with_content(
             index_json=index_json,
             filing=candidate,
             cik_int=cik_int,
         )
         release_json = html_to_llm_json(
             raw_html,
-            include_html=include_html,
-            include_tables=include_tables,
+            include_html=False,
+            include_tables=True,
         )
-
-        source_urls = {
-            "company_tickers": mapping["ticker_map_source_url"],
-            "submissions": f"{self.data_base_url}/submissions/CIK{cik}.json",
-            "filing_index": self._filing_index_url(cik_int, candidate["accessionNumber"]),
-            "selected_document": document_url,
-        }
 
         warnings = []
         if candidate.get("form") not in {"8-K", "6-K"}:
-            warnings.append("selected_filing_is_not_8k_or_6k")
+            warnings.append("filing_form_is_not_8k_or_6k")
         if not _EARNINGS_RELEASE_TERMS.search(str(candidate) + " " + str(document)):
             warnings.append("earnings_release_terms_not_detected_in_filing_metadata")
         if not release_json.get("text"):
@@ -368,22 +356,10 @@ class SECClient:
                 "cik_int": cik_int,
                 "title": mapping.get("company_title"),
             },
-            "selected_filing": {
-                "accessionNumber": candidate.get("accessionNumber"),
-                "form": candidate.get("form"),
-                "filingDate": candidate.get("filingDate"),
-                "reportDate": candidate.get("reportDate"),
-                "acceptanceDateTime": candidate.get("acceptanceDateTime"),
-                "primaryDocument": candidate.get("primaryDocument"),
-                "primaryDocDescription": candidate.get("primaryDocDescription"),
-                "items": candidate.get("items"),
-            },
             "selected_document": document,
-            "source_urls": source_urls,
             "release_json": release_json,
-            "candidate_filings_reviewed": [self._candidate_summary(row, filing_date) for row in filings[:75]],
             "warnings": warnings,
-            "audit_note": (
+            "note": (
                 "This payload is converted from the selected SEC EDGAR filing document into LLM-friendly JSON. "
                 "Review release_json.text and release_json.tables before marking official_release_reviewed=yes."
             ),
@@ -409,7 +385,7 @@ class SECClient:
     def _select_best_filing(filings: list[dict[str, Any]], *, filing_date: str) -> dict[str, Any] | None:
         anchor = _safe_date(filing_date)
 
-        def score(row: dict[str, Any]) -> tuple[int, int]:
+        def rank(row: dict[str, Any]) -> tuple[int, int]:
             form = str(row.get("form") or "").upper()
             filed = _safe_date(row.get("filingDate"))
             metadata = str(row)
@@ -438,154 +414,8 @@ class SECClient:
         relevant = [row for row in filings if str(row.get("form") or "").upper() in {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}]
         if not relevant:
             return None
-        best = max(relevant, key=score)
-        return best if score(best)[0] >= 250 else None
-
-    async def _select_best_document_with_content(
-        self,
-        *,
-        index_json: dict[str, Any],
-        filing: dict[str, Any],
-        cik_int: int,
-    ) -> tuple[dict[str, Any], str, str]:
-        """Select the best exhibit using metadata first, then actual document text."""
-        documents = self._html_documents(index_json)
-        if not documents:
-            raise SECError("SEC filing index did not contain an HTML/TXT document")
-
-        primary = str(filing.get("primaryDocument") or "")
-        accession_number = str(filing.get("accessionNumber") or "")
-        if not accession_number:
-            raise SECError("SEC filing candidate did not include an accession number")
-
-        metadata_ranked = sorted(
-            documents,
-            key=lambda doc: self._document_metadata_score(doc, primary),
-            reverse=True,
-        )[:8]
-
-        scored: list[tuple[int, int, str, dict[str, Any], str, str]] = []
-
-        for document in metadata_ranked:
-            name = str(document.get("name") or "")
-            if not name:
-                continue
-
-            document_url = self._document_url(cik_int, accession_number, name)
-            raw_html = await self._get_text(document_url)
-
-            parsed = html_to_llm_json(
-                raw_html,
-                include_html=False,
-                include_tables=True,
-            )
-
-            parsed_text = str(parsed.get("text") or "")
-            tables = parsed.get("tables")
-            table_count = len(tables) if isinstance(tables, list) else 0
-
-            metadata_score = self._document_metadata_score(document, primary)[0]
-            content_score = self._document_content_score(
-                text=parsed_text,
-                table_count=table_count,
-            )
-
-            scored.append(
-                (
-                    metadata_score + content_score,
-                    len(parsed_text),
-                    name,
-                    document,
-                    document_url,
-                    raw_html,
-                )
-            )
-
-        if not scored:
-            raise SECError("SEC filing index documents could not be fetched for scoring")
-
-        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-        _, _, _, document, document_url, raw_html = scored[0]
-
-        return document, document_url, raw_html
-
-    @staticmethod
-    def _html_documents(index_json: dict[str, Any]) -> list[dict[str, Any]]:
-        items = index_json.get("directory", {}).get("item", [])
-        if isinstance(items, dict):
-            items = [items]
-
-        return [
-            item
-            for item in items
-            if isinstance(item, dict)
-            and _HTML_EXTENSION_RE.search(str(item.get("name") or ""))
-        ]
-
-    @staticmethod
-    def _document_metadata_score(doc: dict[str, Any], primary: str) -> tuple[int, str]:
-        name = str(doc.get("name") or "")
-        description = str(doc.get("description") or "")
-        doc_type = str(doc.get("type") or "")
-        metadata = f"{name} {description} {doc_type}"
-        value = 0
-
-        if name == primary:
-            value += 100
-
-        if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", doc_type, re.I):
-            value += 500
-
-        if re.search(r"EX-?99(\.1)?|EXHIBIT\s*99", name + " " + description, re.I):
-            value += 400
-
-        if re.search(
-            r"(?:^|[_\-.])ex-?99[_\-.]?1(?:\D|$)|exhibit\s*99\.1",
-            metadata,
-            re.I,
-        ):
-            value += 90
-
-        if re.search(
-            r"(?:^|[_\-.])ex-?99[_\-.]?[2-9](?:\D|$)|exhibit\s*99\.[2-9]",
-            metadata,
-            re.I,
-        ):
-            value -= 20
-
-        if _EARNINGS_RELEASE_TERMS.search(metadata):
-            value += 300
-
-        if name.lower().endswith((".htm", ".html")):
-            value += 50
-
-        return value, name
-
-    @staticmethod
-    def _document_content_score(*, text: str, table_count: int) -> int:
-        value = 0
-
-        positive_matches = _EARNINGS_DOCUMENT_POSITIVE_TERMS.findall(text)
-        value += min(len(positive_matches), 12) * 120
-
-        if table_count >= 3:
-            value += 350
-        elif table_count:
-            value += table_count * 50
-
-        if len(text) >= 10000:
-            value += 250
-        elif len(text) >= 5000:
-            value += 100
-
-        if (
-            _CAPITAL_RETURN_ONLY_TERMS.search(text)
-            and len(positive_matches) < 3
-            and table_count < 3
-        ):
-            value -= 700
-
-        return value
+        best = max(relevant, key=rank)
+        return best if rank(best)[0] >= 250 else None
 
     async def _select_best_document_with_content(
         self,
@@ -622,11 +452,11 @@ class SECClient:
 
         metadata_ranked = sorted(
             ranked_candidates,
-            key=lambda doc: self._document_metadata_score(doc, primary),
+            key=lambda doc: self._document_metadata_rank(doc, primary),
             reverse=True,
         )[:12]
 
-        scored: list[tuple[int, int, str, dict[str, Any], str, str]] = []
+        ranked: list[tuple[int, int, str, dict[str, Any], str, str]] = []
 
         for document in metadata_ranked:
             name = str(document.get("name") or "")
@@ -646,15 +476,15 @@ class SECClient:
             tables = parsed.get("tables")
             table_count = len(tables) if isinstance(tables, list) else 0
 
-            metadata_score = self._document_metadata_score(document, primary)[0]
-            content_score = self._document_content_score(
+            metadata_rank = self._document_metadata_rank(document, primary)[0]
+            content_rank = self._document_content_rank(
                 text=parsed_text,
                 table_count=table_count,
             )
 
-            scored.append(
+            ranked.append(
                 (
-                    metadata_score + content_score,
+                    metadata_rank + content_rank,
                     len(parsed_text),
                     name,
                     document,
@@ -663,11 +493,11 @@ class SECClient:
                 )
             )
 
-        if not scored:
-            raise SECError("SEC filing index documents could not be fetched for scoring")
+        if not ranked:
+            raise SECError("SEC filing index documents could not be ranked")
 
-        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-        _, _, _, document, document_url, raw_html = scored[0]
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        _, _, _, document, document_url, raw_html = ranked[0]
 
         return document, document_url, raw_html
 
@@ -701,7 +531,7 @@ class SECClient:
         return bool(_NON_EARNINGS_EXHIBIT_TERMS.search(metadata))
 
     @staticmethod
-    def _document_metadata_score(doc: dict[str, Any], primary: str) -> tuple[int, str]:
+    def _document_metadata_rank(doc: dict[str, Any], primary: str) -> tuple[int, str]:
         name = str(doc.get("name") or "")
         description = str(doc.get("description") or "")
         doc_type = str(doc.get("type") or "")
@@ -742,7 +572,7 @@ class SECClient:
         return value, name
 
     @staticmethod
-    def _document_content_score(*, text: str, table_count: int) -> int:
+    def _document_content_rank(*, text: str, table_count: int) -> int:
         value = 0
 
         if _NON_EARNINGS_EXHIBIT_TERMS.search(text[:20000]):
@@ -792,7 +622,7 @@ class SECClient:
 
         return max(
             candidates,
-            key=lambda doc: SECClient._document_metadata_score(doc, primary),
+            key=lambda doc: SECClient._document_metadata_rank(doc, primary),
         )
 
     @staticmethod
