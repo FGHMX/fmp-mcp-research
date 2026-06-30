@@ -185,10 +185,8 @@ async def fmp_get_earnings_call_transcript(
     )
     payload["raw_data"] = None
     payload["audit_note"] = (
-        "The transcript tool returns the complete transcript text provided by FMP with mechanical completeness metadata. "
-        "The public tool input intentionally does not expose section or max_chars controls. "
-        "Mark full_call_text_read and qna_reviewed yes only after actually reading the returned text. "
-        "If completeness warnings are present, verify the source before scoring."
+        "Use the returned transcript field as source material for concise summaries and verification context only. "
+        "Do not reproduce the transcript verbatim. If completeness warnings are present, verify the source before scoring."
     )
     return payload
 

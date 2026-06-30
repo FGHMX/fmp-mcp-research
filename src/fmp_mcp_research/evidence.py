@@ -171,8 +171,6 @@ def assess_transcript_completeness(items: list[dict[str, Any]]) -> dict[str, Any
 
     return {
         "has_text": has_text,
-        "returned_character_count": char_count,
-        "total_character_count": char_count,
         "word_count": word_count,
         "prepared_remarks_available": bool(prepared.strip()),
         "prepared_remarks_word_count": len(prepared.split()),
@@ -496,31 +494,29 @@ def build_transcript_payload(
     else:
         returned_text = selected_text[:max_chars]
     assessment = assess_transcript_completeness(items)
-    assessment["total_character_count"] = len(selected_text)
-    assessment["returned_character_count"] = len(returned_text)
-    safe_section_text_limit = max_chars if max_chars is not None else len(selected_text)
-    return {
+    transcript_field = {
+        "full": "transcript",
+        "prepared_remarks": "prepared_remarks",
+        "qna": "qna",
+        "metadata": "transcript",
+    }[section]
+
+    payload: dict[str, Any] = {
         "symbol": symbol.upper(),
         "year": year,
         "quarter": quarter,
-        "section": section,
         "source_name": "FMP earning-call-transcript",
         "transcript_available": bool(items and full_text),
         "content_truncated_by_tool": content_truncated_by_tool,
-        "returned_character_count": len(returned_text),
-        "total_character_count": len(selected_text),
-        "full_text": returned_text if section == "full" else None,
-        "prepared_remarks": returned_text if section == "prepared_remarks" else None,
-        "qna": returned_text if section == "qna" else None,
-        "chunks": chunk_text(selected_text) if content_truncated_by_tool else [],
+        transcript_field: returned_text,
         "completeness": assessment,
         "recommended_next_actions": transcript_next_actions(symbol.upper(), year, quarter, section, content_truncated_by_tool, assessment),
-        "section_text_counts": {
-            "prepared_remarks_character_count": len(sections["prepared_remarks"]),
-            "qna_character_count": len(sections["qna"]),
-            "section_preview_character_limit": safe_section_text_limit,
-        },
     }
+
+    if section != "full":
+        payload["section"] = section
+
+    return payload
 
 
 def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, truncated: bool, assessment: dict[str, Any]) -> list[dict[str, Any]]:
