@@ -836,7 +836,6 @@ async def build_evidence_pack(
     annual_income, annual_balance, annual_cash, _, _, _ = await _fetch_financials(
         client, symbol, 3, period="annual"
     )
-    filings = await client.sec_filings(symbol, from_date=f"{min_year}-01-01", to_date=date.today().isoformat())
 
     transcript_statuses = []
     for period in selected_periods:
