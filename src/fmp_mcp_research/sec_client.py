@@ -8,7 +8,6 @@ from html.parser import HTMLParser
 from typing import Any, cast
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
 class SECError(RuntimeError):
@@ -242,12 +241,6 @@ class SECClient:
             "Accept-Encoding": "gzip, deflate",
         }
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError, SECError)),
-        reraise=True,
-    )
     async def _get(self, url: str) -> httpx.Response:
         async with httpx.AsyncClient(timeout=self.timeout, headers=self.headers, follow_redirects=True) as client:
             response = await client.get(url)

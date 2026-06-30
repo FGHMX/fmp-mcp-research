@@ -4,7 +4,6 @@ import os
 from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 
 class FMPError(RuntimeError):
@@ -26,12 +25,6 @@ class FMPClient:
         url = f"{self.base_url}/{path.lstrip('/')}"
         return await self._request(url, clean_params)
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
-        retry=retry_if_exception_type((httpx.TimeoutException, httpx.TransportError, FMPError)),
-        reraise=True,
-    )
     async def _request(self, url: str, params: dict[str, Any]) -> Any:
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(url, params=params)

@@ -36,10 +36,6 @@ EVIDENCE_PACK_VERSION = "0.3.4"
 DEFAULT_TRANSCRIPT_CHAR_BUDGET = 120_000
 MIN_FULL_CALL_WORDS = 2_500
 CHUNK_SIZE_CHARS = 24_000
-OPENAI_RETRY_SUGGESTION = (
-    "If the host rejects or drops this tool call, it may be useful to retry the same call "
-    "up to 3 total attempts before treating the source as unavailable."
-)
 MIN_REASONABLE_QA_POSITION_RATIO = 0.12
 MAX_MANAGEMENT_TO_OPERATOR_DISTANCE = 4000
 
@@ -608,7 +604,6 @@ def earnings_release_review_actions(symbol: str, selected_periods: list[dict[str
                 "Suggested source for the official SEC EDGAR earnings release for this selected quarter. "
                 "The tool returns LLM-friendly text blocks and parsed tables for review."
             ),
-            "retry_suggestion": OPENAI_RETRY_SUGGESTION,
             "suggested_scope": "selected_quarter_official_earnings_release",
             "period_label": period["period_label"],
         })
@@ -802,7 +797,6 @@ def transcript_next_actions(symbol: str, year: int, quarter: int, section: str, 
             "tool": paired_tool,
             "arguments": {"symbol": symbol, "year": year, "quarter": quarter},
             "reason": "Suggested paired earnings-call tool for additional transcript context.",
-            "retry_suggestion": OPENAI_RETRY_SUGGESTION,
         })
     if assessment.get("transcript_quality_status") == "incomplete":
         actions.append({
@@ -886,7 +880,6 @@ async def build_evidence_pack(
                 "reason": (
                     "Suggested source for the start of the earnings call / prepared remarks for this selected quarter."
                 ),
-                "retry_suggestion": OPENAI_RETRY_SUGGESTION,
                 "suggested_scope": "selected_quarter_prepared_remarks",
                 "period_label": p["period_label"],
             },
@@ -896,7 +889,6 @@ async def build_evidence_pack(
                 "reason": (
                     "Suggested source for the earnings-call Q&A for this selected quarter."
                 ),
-                "retry_suggestion": OPENAI_RETRY_SUGGESTION,
                 "suggested_scope": "selected_quarter_q_and_a",
                 "period_label": p["period_label"],
             },
