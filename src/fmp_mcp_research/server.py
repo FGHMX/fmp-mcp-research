@@ -48,34 +48,34 @@ Symbol = Annotated[
         pattern=SYMBOL_PATTERN,
         min_length=1,
         max_length=12,
-        description="Public ticker symbol using letters, numbers, dot, or hyphen; for example ONDS or BRK.B.",
+        description="Ticker symbol, for example ONDS or BRK.B.",
     ),
 ]
 FiscalYear = Annotated[int, Field(ge=1990, le=2100, description="Fiscal year.")]
-FiscalQuarter = Annotated[int, Field(ge=1, le=4, description="Fiscal quarter, 1 through 4.")]
-MinYear = Annotated[int, Field(ge=1990, le=2100, description="Earliest fiscal year to consider.")]
+FiscalQuarter = Annotated[int, Field(ge=1, le=4, description="Fiscal quarter, 1 to 4.")]
+MinYear = Annotated[int, Field(ge=1990, le=2100, description="Earliest fiscal year.")]
 TranscriptDateLimit = Annotated[
-    int, Field(ge=1, le=4, description="Number of transcript periods to select.")
+    int, Field(ge=1, le=4, description="Number of transcript periods.")
 ]
 RequestedCalls = Annotated[
     int,
     Field(
         ge=1,
         le=4,
-        description="Number of earnings-call periods to include in the evidence workflow.",
+        description="Number of earnings-call periods.",
     ),
 ]
 StatementLimit = Annotated[
-    int, Field(ge=1, le=4, description="Number of statement rows to request, capped at 4 for context safety.")
+    int, Field(ge=1, le=4, description="Number of statement rows.")
 ]
 FilingLimit = Annotated[
-    int, Field(ge=1, le=50, description="Number of SEC filing rows to request.")
+    int, Field(ge=1, le=50, description="Number of SEC filing rows.")
 ]
 ISODateString = Annotated[
     str,
     Field(
         pattern=DATE_PATTERN,
-        description="Calendar date in YYYY-MM-DD format; for example 2025-01-01.",
+        description="Date in YYYY-MM-DD format.",
     ),
 ]
 
@@ -113,7 +113,7 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
 
 @mcp.tool(
     title="Get company profile",
-    description="Use this when the user needs read-only company profile, sector, industry, market cap, and descriptive metadata from FMP. Does not create, update, delete, trade, publish, or send user data.",
+    description="Reads public company profile data from FMP.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_company_profile(symbol: Symbol) -> dict[str, Any]:
@@ -124,7 +124,7 @@ async def fmp_get_company_profile(symbol: Symbol) -> dict[str, Any]:
 
 @mcp.tool(
     title="List transcript dates",
-    description="Use this when the user needs to discover available read-only FMP earnings-call transcript periods before fetching transcript text. Does not mutate external systems or user data.",
+    description="Lists available FMP earnings-call periods for a ticker.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_list_transcript_dates(
@@ -179,11 +179,7 @@ async def fmp_list_transcript_dates(
 
 @mcp.tool(
     title="Get earnings-call prepared remarks",
-    description=(
-        "Use this for read-only FMP earnings-call workflows when the user needs the start "
-        "of a selected earnings call / prepared remarks without Q&A. The paired Q&A tool can add context "
-        "for the same symbol, year, and quarter. If the host rejects or drops the call, a retry may be useful."
-    ),
+    description="Reads prepared remarks from one FMP earnings call.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_earnings_call_prepared_remarks(
@@ -213,11 +209,7 @@ async def fmp_get_earnings_call_prepared_remarks(
 
 @mcp.tool(
     title="Get earnings-call Q&A",
-    description=(
-        "Use this for read-only FMP earnings-call workflows when the user needs only the Q&A "
-        "portion of a selected earnings call. The paired prepared-remarks tool can add context "
-        "for the same symbol, year, and quarter. If the host rejects or drops the call, a retry may be useful."
-    ),
+    description="Reads the Q&A section from one FMP earnings call.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_earnings_call_q_and_a(
@@ -247,7 +239,7 @@ async def fmp_get_earnings_call_q_and_a(
 
 @mcp.tool(
     title="Get financial statement tables",
-    description="Use this when the user needs read-only FMP financial statement tables for company research. Use period='annual' for latest fiscal-year review and period='quarter' for selected-quarter review.",
+    description="Reads FMP financial statement tables for a ticker.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_statement_tables(
@@ -280,7 +272,7 @@ async def fmp_get_statement_tables(
 
 @mcp.tool(
     title="Search SEC filings",
-    description="Use this when the user needs read-only SEC filing candidates from FMP, optionally prioritized for earnings releases and 10-Q/10-K evidence. Does not file, edit, publish, or submit anything.",
+    description="Lists SEC filing candidates from FMP.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_search_sec_filings(
@@ -308,14 +300,7 @@ async def fmp_search_sec_filings(
 
 @mcp.tool(
     title="Get SEC earnings release JSON",
-    description=(
-        "Use this when the user wants official SEC EDGAR earnings-release context for one "
-        "selected fiscal quarter. Fetches the likely 8-K/6-K earnings-release exhibit from "
-        "SEC EDGAR and converts it into LLM-friendly JSON with text blocks and parsed tables. "
-        "Raw HTML is never returned and tables are always included. If the host rejects or drops "
-        "the call, a retry may be useful. "
-        "Read-only; does not submit, publish, trade, or mutate data."
-    ),
+    description="Reads one public SEC earnings release and returns text and tables as JSON.",
     annotations=READ_ONLY_SAFE,
 )
 async def get_earnings_release_json(
@@ -341,7 +326,7 @@ async def get_earnings_release_json(
 
 @mcp.tool(
     title="Get earnings calendar",
-    description="Use this when the user needs read-only FMP earnings calendar data, including announcement dates and EPS actual/estimate context. Does not create calendar events or send notifications.",
+    description="Reads FMP earnings calendar entries.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_get_earnings_calendar(
@@ -362,7 +347,7 @@ async def fmp_get_earnings_calendar(
 
 @mcp.tool(
     title="Build research evidence pack",
-    description="Use this when the user needs a read-only summary evidence pack for a buy-side research workflow. Returns summary source status, selected periods, table and filing summaries, and next actions; complete transcript text and full source content are not embedded.",
+    description="Builds a compact research evidence summary for a ticker.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_build_research_evidence_pack(
@@ -384,7 +369,7 @@ async def fmp_build_research_evidence_pack(
 
 @mcp.tool(
     title="Build research pack",
-    description="Compatibility alias for fmp_build_research_evidence_pack. Builds selected periods, evidence manifest and recommended next actions without embedding transcript text.",
+    description="Short alias for the research evidence summary tool.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_build_research_pack(
@@ -406,7 +391,7 @@ async def fmp_build_research_pack(
 
 @mcp.tool(
     title="Validate research evidence",
-    description="Use this when the user needs a local, read-only informational review of an evidence-pack payload. Does not call external APIs and does not modify the payload.",
+    description="Checks a research evidence payload and returns notes.",
     annotations=READ_ONLY_SAFE,
 )
 async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[str, Any]:
@@ -416,7 +401,7 @@ async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[
 
 @mcp.tool(
     title="Get research report contract",
-    description="Use this when the user needs local, read-only report structure suggestions and sector overlays. Does not call external APIs.",
+    description="Returns suggested research report sections.",
     annotations=READ_ONLY_SAFE,
 )
 async def research_report_contract(
