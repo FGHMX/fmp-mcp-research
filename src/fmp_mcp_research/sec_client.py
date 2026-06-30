@@ -24,6 +24,30 @@ _EARNINGS_RELEASE_TERMS = re.compile(
 )
 _HTML_EXTENSION_RE = re.compile(r"\.(htm|html|txt)$", re.I)
 
+_EXHIBIT_99_TERMS = re.compile(
+    r"ex[-_ ]?99|exhibit\s*99",
+    re.I,
+)
+_EARNINGS_DOCUMENT_POSITIVE_TERMS = re.compile(
+    r"financial results|quarterly results|annual results|full year|total revenue|net income|"
+    r"diluted share|diluted eps|revenue comparison|cost of materials|gross margin|"
+    r"consolidated balance sheets|consolidated statements|statements of income|"
+    r"statements of operations|statements of cash flows|cash flows|guidance|conference call",
+    re.I,
+)
+_NON_EARNINGS_EXHIBIT_TERMS = re.compile(
+    r"credit agreement|loan agreement|revolving credit|cusip|lenders|administrative agent|"
+    r"syndication agent|joint lead arranger|bookrunner|article\s+i\.?\s+definitions|"
+    r"borrower|guarantor|indenture|lease agreement|employment agreement|separation agreement|"
+    r"purchase agreement|merger agreement|bylaws|certificate of amendment|execution version",
+    re.I,
+)
+_CAPITAL_RETURN_ONLY_TERMS = re.compile(
+    r"share repurchase authorization|repurchase program|quarterly cash dividend|"
+    r"10b5-1|rule 10b-18",
+    re.I,
+)
+
 _EARNINGS_DOCUMENT_POSITIVE_TERMS = re.compile(
     r"financial results|quarterly results|full year|total revenue|net income|diluted share|"
     r"revenue comparison|cost of materials|consolidated balance sheets|consolidated statements|"
@@ -563,6 +587,189 @@ class SECClient:
 
         return value
 
+    async def _select_best_document_with_content(
+        self,
+        *,
+        index_json: dict[str, Any],
+        filing: dict[str, Any],
+        cik_int: int,
+    ) -> tuple[dict[str, Any], str, str]:
+        """Select the earnings-release exhibit, not unrelated contracts in the same 8-K."""
+        documents = self._html_documents(index_json)
+        if not documents:
+            raise SECError("SEC filing index did not contain an HTML/TXT document")
+
+        primary = str(filing.get("primaryDocument") or "")
+        accession_number = str(filing.get("accessionNumber") or "")
+        if not accession_number:
+            raise SECError("SEC filing candidate did not include an accession number")
+
+        ex99_documents = [
+            document
+            for document in documents
+            if self._is_exhibit_99_document(document)
+            and not self._is_obvious_non_earnings_document(document)
+        ]
+
+        # If the filing has Exhibit 99 documents, do not allow EX-10 credit agreements,
+        # contracts, bylaws, indentures, or other legal exhibits to win just because
+        # they are larger or contain financial-looking words.
+        ranked_candidates = ex99_documents or [
+            document
+            for document in documents
+            if not self._is_obvious_non_earnings_document(document)
+        ] or documents
+
+        metadata_ranked = sorted(
+            ranked_candidates,
+            key=lambda doc: self._document_metadata_score(doc, primary),
+            reverse=True,
+        )[:12]
+
+        scored: list[tuple[int, int, str, dict[str, Any], str, str]] = []
+
+        for document in metadata_ranked:
+            name = str(document.get("name") or "")
+            if not name:
+                continue
+
+            document_url = self._document_url(cik_int, accession_number, name)
+            raw_html = await self._get_text(document_url)
+
+            parsed = html_to_llm_json(
+                raw_html,
+                include_html=False,
+                include_tables=True,
+            )
+
+            parsed_text = str(parsed.get("text") or "")
+            tables = parsed.get("tables")
+            table_count = len(tables) if isinstance(tables, list) else 0
+
+            metadata_score = self._document_metadata_score(document, primary)[0]
+            content_score = self._document_content_score(
+                text=parsed_text,
+                table_count=table_count,
+            )
+
+            scored.append(
+                (
+                    metadata_score + content_score,
+                    len(parsed_text),
+                    name,
+                    document,
+                    document_url,
+                    raw_html,
+                )
+            )
+
+        if not scored:
+            raise SECError("SEC filing index documents could not be fetched for scoring")
+
+        scored.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        _, _, _, document, document_url, raw_html = scored[0]
+
+        return document, document_url, raw_html
+
+    @staticmethod
+    def _html_documents(index_json: dict[str, Any]) -> list[dict[str, Any]]:
+        items = index_json.get("directory", {}).get("item", [])
+        if isinstance(items, dict):
+            items = [items]
+
+        return [
+            item
+            for item in items
+            if isinstance(item, dict)
+            and _HTML_EXTENSION_RE.search(str(item.get("name") or ""))
+        ]
+
+    @staticmethod
+    def _document_metadata_text(doc: dict[str, Any]) -> str:
+        return " ".join(
+            str(doc.get(key) or "")
+            for key in ("name", "description", "type")
+        )
+
+    @staticmethod
+    def _is_exhibit_99_document(doc: dict[str, Any]) -> bool:
+        return bool(_EXHIBIT_99_TERMS.search(SECClient._document_metadata_text(doc)))
+
+    @staticmethod
+    def _is_obvious_non_earnings_document(doc: dict[str, Any]) -> bool:
+        metadata = SECClient._document_metadata_text(doc)
+        return bool(_NON_EARNINGS_EXHIBIT_TERMS.search(metadata))
+
+    @staticmethod
+    def _document_metadata_score(doc: dict[str, Any], primary: str) -> tuple[int, str]:
+        name = str(doc.get("name") or "")
+        description = str(doc.get("description") or "")
+        doc_type = str(doc.get("type") or "")
+        metadata = f"{name} {description} {doc_type}"
+
+        value = 0
+
+        if SECClient._is_obvious_non_earnings_document(doc):
+            value -= 5000
+
+        if SECClient._is_exhibit_99_document(doc):
+            value += 3000
+
+        # In most SEC earnings 8-Ks, EX-99.1 is the earnings press release.
+        # EX-99.2+ is often a supplemental release, slides, or capital-return notice.
+        if re.search(
+            r"(?:^|[_\-.])ex[-_]?99[_\-.]?1(?:\D|$)|exhibit\s*99\.1",
+            metadata,
+            re.I,
+        ):
+            value += 700
+        elif re.search(
+            r"(?:^|[_\-.])ex[-_]?99[_\-.]?[2-9](?:\D|$)|exhibit\s*99\.[2-9]",
+            metadata,
+            re.I,
+        ):
+            value -= 150
+
+        if name == primary:
+            value += 100
+
+        if _EARNINGS_RELEASE_TERMS.search(metadata):
+            value += 300
+
+        if name.lower().endswith((".htm", ".html")):
+            value += 50
+
+        return value, name
+
+    @staticmethod
+    def _document_content_score(*, text: str, table_count: int) -> int:
+        value = 0
+
+        if _NON_EARNINGS_EXHIBIT_TERMS.search(text[:20000]):
+            value -= 5000
+
+        positive_matches = _EARNINGS_DOCUMENT_POSITIVE_TERMS.findall(text)
+        value += min(len(positive_matches), 12) * 180
+
+        if table_count >= 3:
+            value += 500
+        elif table_count:
+            value += table_count * 50
+
+        if len(text) >= 10000:
+            value += 200
+        elif len(text) >= 5000:
+            value += 80
+
+        if (
+            _CAPITAL_RETURN_ONLY_TERMS.search(text[:20000])
+            and len(positive_matches) < 3
+            and table_count < 3
+        ):
+            value -= 1200
+
+        return value
+
     @staticmethod
     def _select_best_document(index_json: dict[str, Any], filing: dict[str, Any]) -> dict[str, Any]:
         documents = SECClient._html_documents(index_json)
@@ -570,8 +777,21 @@ class SECClient:
             raise SECError("SEC filing index did not contain an HTML/TXT document")
 
         primary = str(filing.get("primaryDocument") or "")
+        preferred = [
+            doc
+            for doc in documents
+            if SECClient._is_exhibit_99_document(doc)
+            and not SECClient._is_obvious_non_earnings_document(doc)
+        ]
+
+        candidates = preferred or [
+            doc
+            for doc in documents
+            if not SECClient._is_obvious_non_earnings_document(doc)
+        ] or documents
+
         return max(
-            documents,
+            candidates,
             key=lambda doc: SECClient._document_metadata_score(doc, primary),
         )
 
