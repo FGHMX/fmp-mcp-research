@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass
-from datetime import date
 from typing import Any, Literal
 
 TranscriptSection = Literal["full", "prepared_remarks", "q_and_a", "qna", "metadata"]
