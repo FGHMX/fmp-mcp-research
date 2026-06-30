@@ -52,7 +52,10 @@ def test_all_mcp_tools_have_safe_read_only_annotations():
         assert annotations["readOnlyHint"] is True, tool.name
         assert annotations["destructiveHint"] is False, tool.name
         assert annotations["idempotentHint"] is True, tool.name
-        assert annotations["openWorldHint"] is False, tool.name
+        if tool.name in {"fmp_validate_research_evidence", "research_report_contract"}:
+            assert annotations["openWorldHint"] is False, tool.name
+        else:
+            assert annotations["openWorldHint"] is True, tool.name
 
 
 def test_get_earnings_release_json_uses_fixed_camel_case_inputs_without_html_or_table_flags():

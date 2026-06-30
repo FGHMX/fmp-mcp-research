@@ -11,7 +11,6 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .evidence import (
-    OPENAI_RETRY_SUGGESTION,
     build_evidence_pack,
     build_transcript_payload,
     normalize_transcript_dates,
@@ -32,7 +31,14 @@ mcp = FastMCP(
     port=int(os.getenv("PORT", "8000")),
 )
 
-READ_ONLY_SAFE = ToolAnnotations(
+READ_ONLY_EXTERNAL = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=True,
+)
+
+READ_ONLY_LOCAL = ToolAnnotations(
     readOnlyHint=True,
     destructiveHint=False,
     idempotentHint=True,
@@ -114,7 +120,7 @@ def _clamp(value: int, *, minimum: int, maximum: int) -> int:
 @mcp.tool(
     title="Get company profile",
     description="Reads public company profile data from FMP.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_get_company_profile(symbol: Symbol) -> dict[str, Any]:
     """Get company profile, sector, industry, market cap and descriptive metadata from FMP."""
@@ -125,7 +131,7 @@ async def fmp_get_company_profile(symbol: Symbol) -> dict[str, Any]:
 @mcp.tool(
     title="List transcript dates",
     description="Lists available FMP earnings-call periods for a ticker.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_list_transcript_dates(
     symbol: Symbol, min_year: MinYear = 2025, limit: TranscriptDateLimit = 2
@@ -151,7 +157,6 @@ async def fmp_list_transcript_dates(
                         "quarter": "",
                     },
                     "reason": "Suggested source for the start/prepared remarks for each selected period.",
-                    "retry_suggestion": OPENAI_RETRY_SUGGESTION,
                 },
                 {
                     "tool": "fmp_get_earnings_call_q_and_a",
@@ -161,7 +166,6 @@ async def fmp_list_transcript_dates(
                         "quarter": "",
                     },
                     "reason": "Suggested source for the Q&A for each selected period.",
-                    "retry_suggestion": OPENAI_RETRY_SUGGESTION,
                 },
             ]
             if selected
@@ -180,7 +184,7 @@ async def fmp_list_transcript_dates(
 @mcp.tool(
     title="Get earnings-call prepared remarks",
     description="Reads prepared remarks from one FMP earnings call.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_get_earnings_call_prepared_remarks(
     symbol: Symbol,
@@ -201,8 +205,8 @@ async def fmp_get_earnings_call_prepared_remarks(
     )
     payload["raw_data"] = None
     payload["note"] = (
-        "This tool returns only the earnings-call start/prepared remarks. The paired Q&A tool can provide additional context for the same period. "
-        f"{OPENAI_RETRY_SUGGESTION}"
+        "This tool returns only the earnings-call start/prepared remarks. "
+        "The paired Q&A tool can provide additional context for the same period."
     )
     return payload
 
@@ -210,7 +214,7 @@ async def fmp_get_earnings_call_prepared_remarks(
 @mcp.tool(
     title="Get earnings-call Q&A",
     description="Reads the Q&A section from one FMP earnings call.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_get_earnings_call_q_and_a(
     symbol: Symbol,
@@ -231,8 +235,8 @@ async def fmp_get_earnings_call_q_and_a(
     )
     payload["raw_data"] = None
     payload["note"] = (
-        "This tool returns only the earnings-call Q&A. The paired prepared-remarks tool can provide additional context for the same period. "
-        f"{OPENAI_RETRY_SUGGESTION}"
+        "This tool returns only the earnings-call Q&A. "
+        "The paired prepared-remarks tool can provide additional context for the same period."
     )
     return payload
 
@@ -240,7 +244,7 @@ async def fmp_get_earnings_call_q_and_a(
 @mcp.tool(
     title="Get financial statement tables",
     description="Reads FMP financial statement tables for a ticker.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_get_statement_tables(
     symbol: Symbol, period: Literal["quarter", "annual"] = "quarter", limit: StatementLimit = 4
@@ -273,7 +277,7 @@ async def fmp_get_statement_tables(
 @mcp.tool(
     title="Search SEC filings",
     description="Lists SEC filing candidates from FMP.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_search_sec_filings(
     symbol: Symbol,
@@ -301,7 +305,7 @@ async def fmp_search_sec_filings(
 @mcp.tool(
     title="Get SEC earnings release JSON",
     description="Reads one public SEC earnings release and returns text and tables as JSON.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def get_earnings_release_json(
     symbol: Symbol,
@@ -320,14 +324,13 @@ async def get_earnings_release_json(
         fiscal_quarter=fiscalQuarter,
         filing_date=clean_filing_date,
     )
-    payload["retry_suggestion"] = OPENAI_RETRY_SUGGESTION
     return payload
 
 
 @mcp.tool(
     title="Get earnings calendar",
     description="Reads FMP earnings calendar entries.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_get_earnings_calendar(
     symbol: Symbol | None = None,
@@ -348,7 +351,7 @@ async def fmp_get_earnings_calendar(
 @mcp.tool(
     title="Build research evidence pack",
     description="Builds a compact research evidence summary for a ticker.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_build_research_evidence_pack(
     symbol: Symbol,
@@ -370,7 +373,7 @@ async def fmp_build_research_evidence_pack(
 @mcp.tool(
     title="Build research pack",
     description="Short alias for the research evidence summary tool.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_EXTERNAL,
 )
 async def fmp_build_research_pack(
     symbol: Symbol,
@@ -392,7 +395,7 @@ async def fmp_build_research_pack(
 @mcp.tool(
     title="Validate research evidence",
     description="Checks a research evidence payload and returns notes.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_LOCAL,
 )
 async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[str, Any]:
     """Review an evidence-pack payload informationally and return notes / next actions."""
@@ -402,7 +405,7 @@ async def fmp_validate_research_evidence(evidence_pack: dict[str, Any]) -> dict[
 @mcp.tool(
     title="Get research report contract",
     description="Returns suggested research report sections.",
-    annotations=READ_ONLY_SAFE,
+    annotations=READ_ONLY_LOCAL,
 )
 async def research_report_contract(
     sector: Literal["pharma", "healthcare_technology", "general"] = "healthcare_technology",
