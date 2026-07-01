@@ -4,6 +4,7 @@ import html
 import os
 import re
 from datetime import date
+from collections import Counter
 from html.parser import HTMLParser
 from typing import Any, cast
 
@@ -22,35 +23,6 @@ _EARNINGS_RELEASE_TERMS = re.compile(
     re.I,
 )
 _HTML_EXTENSION_RE = re.compile(r"\.(htm|html|txt)$", re.I)
-_TEXT_CONTENT_TYPES = (
-    "text/html",
-    "text/plain",
-    "application/xhtml+xml",
-    "application/xml",
-    "text/xml",
-)
-_BINARY_EXTENSIONS = (
-    ".jpg",
-    ".jpeg",
-    ".png",
-    ".gif",
-    ".webp",
-    ".pdf",
-    ".zip",
-    ".xls",
-    ".xlsx",
-    ".doc",
-    ".docx",
-)
-_BINARY_SIGNATURES = (
-    b"\xff\xd8\xff",  # JPEG
-    b"\x89PNG\r\n\x1a\n",  # PNG
-    b"GIF87a",
-    b"GIF89a",
-    b"%PDF",
-    b"PK\x03\x04",  # ZIP / Office containers
-)
-_DEFAULT_MAX_RELEASE_CHARS = 200_000
 
 _EXHIBIT_99_TERMS = re.compile(
     r"ex[-_ ]?99|exhibit\s*99",
@@ -98,49 +70,6 @@ def _clean_text(value: str) -> str:
     return value.strip()
 
 
-def _looks_binary(data: bytes) -> bool:
-    if not data:
-        return False
-    if any(data.startswith(signature) for signature in _BINARY_SIGNATURES):
-        return True
-
-    sample = data[:4096]
-    if b"\x00" in sample:
-        return True
-
-    control_chars = sum(1 for byte in sample if byte < 32 and byte not in (9, 10, 13))
-    return control_chars / max(len(sample), 1) > 0.05
-
-
-def _looks_like_binary_garbage(text: str) -> bool:
-    if not text:
-        return False
-
-    sample = text[:10000]
-    printable = sum(ch.isprintable() or ch in "\n\r\t" for ch in sample)
-    printable_ratio = printable / max(len(sample), 1)
-    repeated_noise = sample.count("BBB@") > 20 or sample.count("HHHH") > 20 or sample.count("****") > 100
-    text_markers = ("<html", "<table", "revenue", "net income", "cash flow", "balance sheet")
-    has_text_marker = any(marker in sample.lower() for marker in text_markers)
-
-    return (printable_ratio < 0.85 or repeated_noise) and not has_text_marker
-
-
-def _is_text_content_type(content_type: str) -> bool:
-    lowered = content_type.lower().split(";", 1)[0].strip()
-    return not lowered or lowered in _TEXT_CONTENT_TYPES or lowered.endswith("+xml")
-
-
-def _is_binary_document_name(name: str) -> bool:
-    return name.lower().endswith(_BINARY_EXTENSIONS)
-
-
-def _truncate_release_markdown(markdown: str, max_chars: int) -> tuple[str, bool]:
-    if max_chars <= 0 or len(markdown) <= max_chars:
-        return markdown, False
-    return markdown[:max_chars].rstrip() + "\n", True
-
-
 def _safe_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -161,6 +90,7 @@ class _SECReleaseHTMLParser(HTMLParser):
         self._tag_stack: list[str] = []
         self._text_parts: list[str] = []
         self._blocks: list[dict[str, Any]] = []
+        self._sections: list[dict[str, Any]] = []
         self._current_block_tag: str | None = None
         self._current_block_parts: list[str] = []
         self._tables: list[list[list[str]]] = []
@@ -205,6 +135,7 @@ class _SECReleaseHTMLParser(HTMLParser):
             elif tag == "table" and self._current_table is not None:
                 if self._current_table:
                     self._tables.append(self._current_table)
+                    self._sections.append({"type": "table", "rows": self._current_table})
                 self._current_table = None
             if tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "div"}:
                 self._finish_block(tag)
@@ -237,7 +168,9 @@ class _SECReleaseHTMLParser(HTMLParser):
         text = _clean_text(" ".join(self._current_block_parts))
         if text:
             kind = "heading" if tag.startswith("h") else ("list_item" if tag == "li" else "paragraph")
-            self._blocks.append({"type": kind, "tag": tag, "text": text})
+            block = {"type": kind, "tag": tag, "text": text}
+            self._blocks.append(block)
+            self._sections.append(block)
         self._current_block_tag = None
         self._current_block_parts = []
 
@@ -247,6 +180,7 @@ class _SECReleaseHTMLParser(HTMLParser):
             "text": full_text,
             "blocks": self._dedupe_blocks(self._blocks),
             "tables": self._tables,
+            "sections": self._dedupe_sections(self._sections),
         }
 
     @staticmethod
@@ -258,6 +192,21 @@ class _SECReleaseHTMLParser(HTMLParser):
             if text and text != previous:
                 output.append(block)
                 previous = text
+        return output
+
+    @staticmethod
+    def _dedupe_sections(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        output: list[dict[str, Any]] = []
+        previous_text = ""
+        for section in sections:
+            if section.get("type") == "table":
+                output.append(section)
+                previous_text = ""
+                continue
+            text = str(section.get("text") or "")
+            if text and text != previous_text:
+                output.append(section)
+                previous_text = text
         return output
 
 
@@ -304,48 +253,247 @@ def _markdown_escape_cell(value: Any) -> str:
     return _clean_text(str(value or "")).replace("|", "\\|")
 
 
-def _markdown_table(rows: list[list[str]]) -> str:
+def _cell_to_text(value: Any) -> str:
+    text = _clean_text(str(value or ""))
+    if text.lower() in {"nan", "none", "null", "nat"}:
+        return ""
+    return text
+
+
+def _remove_consecutive_duplicates(cells: list[str]) -> list[str]:
+    output: list[str] = []
+    for cell in cells:
+        clean = _cell_to_text(cell)
+        if not clean:
+            continue
+        if output and output[-1].lower() == clean.lower():
+            continue
+        output.append(clean)
+    return output
+
+
+def _merge_currency_cells(cells: list[str]) -> list[str]:
+    output: list[str] = []
+    i = 0
+    while i < len(cells):
+        cell = _cell_to_text(cells[i])
+        if cell in {"$", "€", "£", "¥"} and i + 1 < len(cells):
+            nxt = _cell_to_text(cells[i + 1])
+            if nxt:
+                output.append(f"{cell}{nxt}")
+                i += 2
+                continue
+        output.append(cell)
+        i += 1
+    return [item for item in output if item]
+
+
+def _compact_row_values(row: list[str]) -> list[str]:
+    cells = [_cell_to_text(cell) for cell in row]
+    cells = [cell for cell in cells if cell]
+    cells = _remove_consecutive_duplicates(cells)
+    cells = _merge_currency_cells(cells)
+    return _remove_consecutive_duplicates(cells)
+
+
+def _is_year(text: str) -> bool:
+    return bool(re.fullmatch(r"20\d{2}|19\d{2}", _cell_to_text(text)))
+
+
+def _is_period_label(text: str) -> bool:
+    lower = _cell_to_text(text).lower()
+    return any(
+        phrase in lower
+        for phrase in (
+            "three months ended",
+            "six months ended",
+            "nine months ended",
+            "twelve months ended",
+            "year ended",
+            "years ended",
+            "quarter ended",
+            "months ended",
+            "march 31",
+            "june 30",
+            "september 30",
+            "december 31",
+            "january 31",
+            "april 30",
+            "july 31",
+            "october 31",
+        )
+    )
+
+
+def _is_section_label(cells: list[str]) -> bool:
+    if not cells:
+        return False
+    if len(cells) == 1 and cells[0].endswith(":"):
+        return True
+    first = cells[0].lower().strip()
+    return first in {
+        "assets",
+        "current assets:",
+        "current assets",
+        "liabilities and stockholders' equity",
+        "liabilities and shareholders' equity",
+        "current liabilities:",
+        "current liabilities",
+        "stockholders' equity:",
+        "shareholders' equity:",
+        "cash flows from operating activities:",
+        "cash flows from investing activities:",
+        "cash flows from financing activities:",
+        "net income per share:",
+        "weighted average shares outstanding:",
+    }
+
+
+def _detect_period_headers(rows: list[list[str]]) -> list[str] | None:
+    early = rows[:8]
+    for row in early:
+        years = [cell for cell in row if _is_year(cell)]
+        if len(years) >= 2:
+            return years
+    date_re = re.compile(
+        r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}",
+        re.I,
+    )
+    for row in early:
+        dates = [cell for cell in row if date_re.search(cell)]
+        if len(dates) >= 2:
+            return dates
+    return None
+
+
+def _row_to_semantic(row: list[str], headers: list[str] | None) -> list[str] | None:
+    if not row:
+        return None
+    if all(_is_year(cell) for cell in row):
+        return None
+    if len(row) == 1 and _is_period_label(row[0]):
+        return None
+    if not headers:
+        return row
+    if _is_section_label(row):
+        return [row[0]] + [""] * len(headers)
+    label = row[0]
+    values = row[1:]
+    if _is_period_label(label) and not values:
+        return None
+    if len(row) <= len(headers) and all(_is_year(cell) or _is_period_label(cell) for cell in row):
+        return None
+    if len(values) < len(headers):
+        values = values + [""] * (len(headers) - len(values))
+    elif len(values) > len(headers):
+        values = values[: len(headers) - 1] + [" ".join(values[len(headers) - 1 :])]
+    return [label] + values
+
+
+def _markdown_table_from_rows(headers: list[str], rows: list[list[str]]) -> str:
     if not rows:
         return ""
-    max_cols = max((len(row) for row in rows), default=0)
-    if max_cols == 0:
+    max_cols = max(len(headers), max((len(row) for row in rows), default=0))
+    headers = headers + [f"Value {i}" for i in range(len(headers), max_cols)]
+    normalized_rows = [row + [""] * (max_cols - len(row)) for row in rows]
+    lines = ["|" + "|".join(_markdown_escape_cell(cell) for cell in headers[:max_cols]) + "|"]
+    lines.append("|" + "|".join("-" if i == 0 else "-:" for i in range(max_cols)) + "|")
+    for row in normalized_rows:
+        if any(_cell_to_text(cell) for cell in row):
+            lines.append("|" + "|".join(_markdown_escape_cell(cell) for cell in row[:max_cols]) + "|")
+    return "\n".join(lines).strip()
+
+
+def _compact_table_markdown(rows: list[list[str]]) -> str:
+    compact_rows = [_compact_row_values(row) for row in rows]
+    compact_rows = [row for row in compact_rows if row]
+    if not compact_rows:
         return ""
-    normalized = [row + [""] * (max_cols - len(row)) for row in rows]
-    header = normalized[0]
-    body = normalized[1:]
-    # SEC tables often do not have clean header rows. Keep the first row as the header
-    # to preserve source order and avoid inventing labels.
-    lines = ["|" + "|".join(_markdown_escape_cell(cell) for cell in header) + "|"]
-    lines.append("|" + "|".join("---" for _ in range(max_cols)) + "|")
-    for row in body:
-        if any(_clean_text(cell) for cell in row):
-            lines.append("|" + "|".join(_markdown_escape_cell(cell) for cell in row) + "|")
-    return "\n".join(lines)
+    headers = _detect_period_headers(compact_rows)
+    if headers:
+        semantic_rows = []
+        for row in compact_rows:
+            converted = _row_to_semantic(row, headers)
+            if converted:
+                semantic_rows.append(converted)
+        if semantic_rows:
+            return _markdown_table_from_rows(["Item"] + headers, semantic_rows)
+    max_cols = max(len(row) for row in compact_rows)
+    generic_headers = ["Item"] + [f"Value {i}" for i in range(1, max_cols)]
+    return _markdown_table_from_rows(generic_headers, compact_rows)
+
+
+FINANCIAL_STATEMENT_KEYWORDS = (
+    "statement of operations", "statements of operations", "statement of income",
+    "statements of income", "statement of earnings", "balance sheet", "balance sheets",
+    "statement of cash flows", "statements of cash flows", "consolidated statement",
+    "consolidated statements", "condensed consolidated",
+)
+NON_GAAP_KEYWORDS = (
+    "non-gaap", "reconciliation", "adjusted ebitda", "adjusted net income",
+    "adjusted diluted earnings per share", "adjusted eps", "free cash flow", "affo", "ffo", "ebitda",
+)
+CONTACT_KEYWORDS = ("investors", "media", "investor relations", "corporate communications")
+
+
+def _table_heading(title: str, table_number: int, rows: list[list[str]]) -> str:
+    blob = (title + " " + " ".join(" ".join(row) for row in rows[:8])).lower()
+    if any(keyword in blob for keyword in NON_GAAP_KEYWORDS):
+        label = "Non-GAAP Table"
+    elif any(keyword in blob for keyword in FINANCIAL_STATEMENT_KEYWORDS):
+        label = "Financial Table"
+    elif any(keyword in blob for keyword in CONTACT_KEYWORDS):
+        label = "Contact Table"
+    else:
+        label = "Table"
+    clean_title = _clean_text(title)[:180]
+    if clean_title and not re.fullmatch(r"table\s+\d+", clean_title, flags=re.I):
+        return f"## {label} {table_number}: {clean_title}"
+    return f"## {label} {table_number}"
+
+
+def _headline_from_sections(sections: list[dict[str, Any]]) -> str:
+    for section in sections[:20]:
+        if section.get("type") == "table":
+            continue
+        text = _clean_text(str(section.get("text", "")))
+        lower = text.lower()
+        if text and len(text) <= 220 and (
+            ("reports" in lower and ("results" in lower or "earnings" in lower))
+            or ("announces" in lower and ("results" in lower or "earnings" in lower))
+        ):
+            return text
+    for section in sections[:20]:
+        if section.get("type") != "table":
+            text = _clean_text(str(section.get("text", "")))
+            if text and len(text) <= 220:
+                return text
+    return "SEC Earnings Release"
+
+
+def _period_label(fiscal_year: int, fiscal_quarter: int) -> str:
+    return f"Q{int(fiscal_quarter)} FY{int(fiscal_year)}"
 
 
 def html_to_llm_markdown(raw_html: str, *, metadata: dict[str, Any]) -> str:
     parser = _SECReleaseHTMLParser()
     parser.feed(raw_html)
     parsed = parser.release_json()
-    blocks = parsed["blocks"]
-    tables = parsed["tables"]
-
-    title = "SEC Earnings Release"
-    for block in blocks[:12]:
-        block_text = _clean_text(str(block.get("text", "")))
-        if block_text and len(block_text) <= 180:
-            title = block_text
-            break
+    sections = parsed.get("sections") or []
+    tables = parsed.get("tables") or []
+    title = _headline_from_sections(sections)
 
     frontmatter = {
         "format": "sec_earnings_release_llm_markdown",
         "symbol": metadata.get("symbol"),
         "fiscal_year": metadata.get("fiscalYear"),
         "fiscal_quarter": metadata.get("fiscalQuarter"),
+        "requested_period": metadata.get("requestedPeriod"),
         "filing_date": metadata.get("filingDate"),
         "source_name": "SEC EDGAR",
         "company_title": metadata.get("company_title"),
         "cik": metadata.get("cik"),
+        "accession_number": metadata.get("accessionNumber"),
         "selected_document": metadata.get("selected_document_name"),
         "selected_document_url": metadata.get("selected_document_url"),
         "table_count": len(tables),
@@ -358,26 +506,35 @@ def html_to_llm_markdown(raw_html: str, *, metadata: dict[str, Any]) -> str:
     lines.extend(["---", "", f"# {title}", ""])
 
     previous_text = ""
-    for block in blocks:
-        block_text = _clean_text(str(block.get("text", "")))
+    recent_text_title = ""
+    table_number = 0
+    for section in sections:
+        if section.get("type") == "table":
+            rows = section.get("rows") or []
+            table_md = _compact_table_markdown(rows)
+            if table_md:
+                table_number += 1
+                lines.extend([_table_heading(recent_text_title, table_number, rows), "", table_md, ""])
+            continue
+        block_text = _clean_text(str(section.get("text", "")))
         if not block_text or block_text == previous_text:
             continue
         previous_text = block_text
-        if block.get("type") == "heading" and block_text != title:
-            lines.extend([f"## {block_text}", ""])
-        elif block.get("type") == "list_item":
+        if len(block_text) <= 220:
+            recent_text_title = block_text
+        if section.get("type") == "heading":
+            if block_text != title:
+                lines.extend([f"## {block_text}", ""])
+            continue
+        if section.get("type") == "list_item":
             lines.append(f"- {block_text}")
         else:
             lines.extend([block_text, ""])
 
-    for index, rows in enumerate(tables, start=1):
-        table_md = _markdown_table(rows)
-        if table_md:
-            lines.extend([f"## Table {index}", "", table_md, ""])
-
     markdown = "\n".join(lines)
     markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
     return markdown
+
 
 
 
@@ -391,7 +548,7 @@ class SECClient:
             "fmp-mcp-research/0.3.4 contact@example.com",
         )
         self.max_supplemental_files = int(os.getenv("SEC_MAX_SUPPLEMENTAL_SUBMISSION_FILES", "3"))
-        self.max_release_chars = int(os.getenv("SEC_MAX_RELEASE_TEXT_CHARS", str(_DEFAULT_MAX_RELEASE_CHARS)))
+        self.max_earnings_release_scan = int(os.getenv("SEC_EARNINGS_RELEASE_SCAN_LIMIT", "40"))
 
     @property
     def headers(self) -> dict[str, str]:
@@ -417,23 +574,8 @@ class SECClient:
             raise SECError("SEC returned non-JSON response") from exc
 
     async def _get_text(self, url: str) -> str:
-        if _is_binary_document_name(url):
-            raise SECError(f"Skipping binary SEC file by extension: {url}")
-
         response = await self._get(url)
-        content_type = response.headers.get("content-type", "")
-        raw = response.content
-
-        if not _is_text_content_type(content_type):
-            raise SECError(f"Skipping non-text SEC file: {content_type} {url}")
-        if _looks_binary(raw):
-            raise SECError(f"Skipping binary SEC file by content: {url}")
-
-        encoding = response.encoding or "utf-8"
-        text = raw.decode(encoding, errors="replace")
-        if _looks_like_binary_garbage(text):
-            raise SECError(f"Skipping SEC file that decoded as binary garbage: {url}")
-        return text
+        return response.text
 
     async def cik_for_symbol(self, symbol: str) -> dict[str, Any]:
         symbol_upper = symbol.upper()
@@ -471,7 +613,6 @@ class SECClient:
         symbol: str,
         fiscal_year: int,
         fiscal_quarter: int,
-        filing_date: str,
     ) -> str:
         mapping = await self.cik_for_symbol(symbol)
         cik = mapping["cik"]
@@ -486,29 +627,68 @@ class SECClient:
                 continue
             filings.extend(self._normalize_filings((await self._supplemental_submissions(name)).get("filings", {})))
 
-        candidate = self._select_best_filing(filings, filing_date=filing_date)
-        if candidate is None:
-            raise SECError(
-                f"No likely 8-K/6-K earnings-release filing found for {symbol.upper()} near {filing_date}"
-            )
+        ranked_filings = self._rank_candidate_filings(
+            filings,
+            fiscal_year=fiscal_year,
+            fiscal_quarter=fiscal_quarter,
+        )[: self.max_earnings_release_scan]
+        if not ranked_filings:
+            raise SECError(f"No likely 8-K/6-K earnings-release filings found for {symbol.upper()}")
 
-        index_json = await self._filing_index(cik_int, candidate["accessionNumber"])
-        document, _document_url, raw_html = await self._select_best_document_with_content(
-            index_json=index_json,
-            filing=candidate,
-            cik_int=cik_int,
-        )
+        best: tuple[int, int, dict[str, Any], dict[str, Any], str, str] | None = None
+        failures: list[str] = []
+        for candidate in ranked_filings:
+            try:
+                index_json = await self._filing_index(cik_int, candidate["accessionNumber"])
+                document, document_url, raw_html = await self._select_best_document_with_content(
+                    index_json=index_json,
+                    filing=candidate,
+                    cik_int=cik_int,
+                    fiscal_year=fiscal_year,
+                    fiscal_quarter=fiscal_quarter,
+                )
+                parsed = html_to_llm_json(raw_html, include_html=False, include_tables=True)
+                parsed_text = str(parsed.get("text") or "")
+                tables = parsed.get("tables")
+                table_count = len(tables) if isinstance(tables, list) else 0
+                content_score = self._document_content_rank(
+                    text=parsed_text,
+                    table_count=table_count,
+                    fiscal_year=fiscal_year,
+                    fiscal_quarter=fiscal_quarter,
+                )
+                filing_score = self._filing_metadata_rank(
+                    candidate,
+                    fiscal_year=fiscal_year,
+                    fiscal_quarter=fiscal_quarter,
+                )
+                score = filing_score + content_score
+                item = (score, len(parsed_text), candidate, document, document_url, raw_html)
+                if best is None or item[:2] > best[:2]:
+                    best = item
+            except Exception as exc:  # pragma: no cover - network payloads vary by filing
+                failures.append(str(exc)[:160])
+                continue
+
+        if best is None:
+            detail = "; ".join(failures[:3])
+            raise SECError(f"Could not read a likely earnings-release exhibit for {symbol.upper()}. {detail}")
+
+        score, _, candidate, document, document_url, raw_html = best
+        requested_period = _period_label(fiscal_year, fiscal_quarter)
         markdown = html_to_llm_markdown(
             raw_html,
             metadata={
                 "symbol": symbol.upper(),
                 "fiscalYear": fiscal_year,
                 "fiscalQuarter": fiscal_quarter,
-                "filingDate": filing_date,
+                "requestedPeriod": requested_period,
+                "filingDate": candidate.get("filingDate"),
                 "company_title": mapping.get("company_title"),
                 "cik": cik,
+                "accessionNumber": candidate.get("accessionNumber"),
                 "selected_document_name": document.get("name") or document.get("href"),
-                "selected_document_url": _document_url,
+                "selected_document_url": document_url,
             },
         )
 
@@ -517,12 +697,12 @@ class SECClient:
             warnings.append("filing_form_is_not_8k_or_6k")
         if not _EARNINGS_RELEASE_TERMS.search(str(candidate) + " " + str(document)):
             warnings.append("earnings_release_terms_not_detected_in_filing_metadata")
+        if not self._period_text_rank(str(html_to_llm_json(raw_html).get("text") or ""), fiscal_year, fiscal_quarter):
+            warnings.append("requested_fiscal_period_not_strongly_detected_in_release_text")
         if not markdown.strip():
             warnings.append("selected_document_markdown_is_empty_after_html_conversion")
-
-        markdown, was_truncated = _truncate_release_markdown(markdown, self.max_release_chars)
-        if was_truncated:
-            warnings.append("selected_document_markdown_truncated_server_side")
+        if score < 1500:
+            warnings.append("low_confidence_filing_selection")
 
         if warnings:
             warning_lines = "\n".join(f"- {warning}" for warning in warnings)
@@ -547,40 +727,101 @@ class SECClient:
         return rows
 
     @staticmethod
-    def _select_best_filing(filings: list[dict[str, Any]], *, filing_date: str) -> dict[str, Any] | None:
-        anchor = _safe_date(filing_date)
-
-        def rank(row: dict[str, Any]) -> tuple[int, int]:
-            form = str(row.get("form") or "").upper()
-            filed = _safe_date(row.get("filingDate"))
-            metadata = str(row)
-            value = 0
-            if form in {"8-K", "6-K"}:
-                value += 1000
-            elif form in {"10-Q", "10-K", "20-F", "40-F"}:
+    def _filing_metadata_rank(
+        row: dict[str, Any],
+        *,
+        fiscal_year: int | None = None,
+        fiscal_quarter: int | None = None,
+        filing_date: str | None = None,
+    ) -> int:
+        form = str(row.get("form") or "").upper()
+        filed = _safe_date(row.get("filingDate"))
+        report_date = _safe_date(row.get("reportDate"))
+        metadata = str(row)
+        value = 0
+        if form in {"8-K", "6-K"}:
+            value += 1000
+        elif form in {"10-Q", "10-K", "20-F", "40-F"}:
+            value += 250
+        if re.search(r"\b2\.02\b|results of operations|financial condition", str(row.get("items") or ""), re.I):
+            value += 350
+        if _EARNINGS_RELEASE_TERMS.search(metadata):
+            value += 175
+        if fiscal_year and str(int(fiscal_year)) in metadata:
+            value += 40
+        if fiscal_quarter and re.search(rf"\bq{int(fiscal_quarter)}\b|quarter", metadata, re.I):
+            value += 30
+        anchor = _safe_date(filing_date) if filing_date else None
+        if anchor and filed:
+            distance = abs((filed - anchor).days)
+            if distance <= 2:
+                value += 350
+            elif distance <= 14:
                 value += 250
-            if re.search(r"\b2\.02\b|results of operations|financial condition", str(row.get("items") or ""), re.I):
-                value += 250
-            if _EARNINGS_RELEASE_TERMS.search(metadata):
+            elif distance <= 45:
                 value += 150
-            distance = 9999
-            if anchor and filed:
-                distance = abs((filed - anchor).days)
-                if distance <= 2:
-                    value += 350
-                elif distance <= 14:
-                    value += 250
-                elif distance <= 45:
-                    value += 150
-                elif distance <= 90:
-                    value += 50
-            return value, -distance
+            elif distance <= 90:
+                value += 50
+        if fiscal_year and report_date:
+            # Report dates close to common quarter-end months are a mild signal only;
+            # many issuers use non-calendar fiscal years.
+            if str(int(fiscal_year)) in str(row.get("reportDate") or ""):
+                value += 50
+        return value
 
-        relevant = [row for row in filings if str(row.get("form") or "").upper() in {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}]
-        if not relevant:
+    @classmethod
+    def _rank_candidate_filings(
+        cls,
+        filings: list[dict[str, Any]],
+        *,
+        fiscal_year: int | None = None,
+        fiscal_quarter: int | None = None,
+        filing_date: str | None = None,
+    ) -> list[dict[str, Any]]:
+        relevant = [
+            row
+            for row in filings
+            if str(row.get("form") or "").upper() in {"8-K", "6-K", "10-Q", "10-K", "20-F", "40-F"}
+        ]
+        return sorted(
+            relevant,
+            key=lambda row: (
+                cls._filing_metadata_rank(
+                    row,
+                    fiscal_year=fiscal_year,
+                    fiscal_quarter=fiscal_quarter,
+                    filing_date=filing_date,
+                ),
+                str(row.get("filingDate") or ""),
+            ),
+            reverse=True,
+        )
+
+    @classmethod
+    def _select_best_filing(
+        cls,
+        filings: list[dict[str, Any]],
+        *,
+        filing_date: str | None = None,
+        fiscal_year: int | None = None,
+        fiscal_quarter: int | None = None,
+    ) -> dict[str, Any] | None:
+        ranked = cls._rank_candidate_filings(
+            filings,
+            fiscal_year=fiscal_year,
+            fiscal_quarter=fiscal_quarter,
+            filing_date=filing_date,
+        )
+        if not ranked:
             return None
-        best = max(relevant, key=rank)
-        return best if rank(best)[0] >= 250 else None
+        best = ranked[0]
+        score = cls._filing_metadata_rank(
+            best,
+            fiscal_year=fiscal_year,
+            fiscal_quarter=fiscal_quarter,
+            filing_date=filing_date,
+        )
+        return best if score >= 250 else None
 
     async def _select_best_document_with_content(
         self,
@@ -588,6 +829,8 @@ class SECClient:
         index_json: dict[str, Any],
         filing: dict[str, Any],
         cik_int: int,
+        fiscal_year: int | None = None,
+        fiscal_quarter: int | None = None,
     ) -> tuple[dict[str, Any], str, str]:
         """Select the earnings-release exhibit, not unrelated contracts in the same 8-K."""
         documents = self._html_documents(index_json)
@@ -645,6 +888,8 @@ class SECClient:
             content_rank = self._document_content_rank(
                 text=parsed_text,
                 table_count=table_count,
+                fiscal_year=fiscal_year,
+                fiscal_quarter=fiscal_quarter,
             )
 
             ranked.append(
@@ -737,7 +982,44 @@ class SECClient:
         return value, name
 
     @staticmethod
-    def _document_content_rank(*, text: str, table_count: int) -> int:
+    def _period_text_rank(text: str, fiscal_year: int | None, fiscal_quarter: int | None) -> int:
+        if not fiscal_year or not fiscal_quarter:
+            return 0
+        year = int(fiscal_year)
+        quarter = int(fiscal_quarter)
+        q_word = {1: "first", 2: "second", 3: "third", 4: "fourth"}.get(quarter, "")
+        q_short = f"q{quarter}"
+        lower = text.lower()
+        value = 0
+        strong_patterns = [
+            rf"{q_word}\s+quarter\s+(?:fiscal\s+)?{year}",
+            rf"fiscal\s+{year}\s+{q_word}\s+quarter",
+            rf"{q_short}\s+(?:fy|fiscal\s+)?{year}",
+            rf"{q_short}\s+{year}",
+        ]
+        if any(re.search(pattern, lower, re.I) for pattern in strong_patterns):
+            value += 2500
+        if str(year) in lower:
+            value += 200
+        if q_word and f"{q_word} quarter" in lower:
+            value += 500
+        if q_short in lower:
+            value += 250
+        # Penalize obvious wrong quarters when the requested quarter is not mentioned.
+        other_words = {1: "first", 2: "second", 3: "third", 4: "fourth"}
+        for other_q, other_word in other_words.items():
+            if other_q != quarter and f"{other_word} quarter" in lower and f"{q_word} quarter" not in lower:
+                value -= 600
+        return value
+
+    @staticmethod
+    def _document_content_rank(
+        *,
+        text: str,
+        table_count: int,
+        fiscal_year: int | None = None,
+        fiscal_quarter: int | None = None,
+    ) -> int:
         value = 0
 
         if _NON_EARNINGS_EXHIBIT_TERMS.search(text[:20000]):
@@ -745,6 +1027,7 @@ class SECClient:
 
         positive_matches = _EARNINGS_DOCUMENT_POSITIVE_TERMS.findall(text)
         value += min(len(positive_matches), 12) * 180
+        value += SECClient._period_text_rank(text[:40000], fiscal_year, fiscal_quarter)
 
         if table_count >= 3:
             value += 500

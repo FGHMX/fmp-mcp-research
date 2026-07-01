@@ -12,11 +12,25 @@ Read-only MCP server for FMP and SEC research context. The server behaves as an 
 | `fmp_get_earnings_call_q_and_a` | Return Q&A text for a selected period. |
 | `fmp_get_statement_tables` | Return income statement, balance sheet, cash flow, metrics, ratios and growth tables. |
 | `fmp_search_sec_filings` | Return SEC filing candidates from FMP. |
-| `get_earnings_release` | Fetch a likely SEC earnings-release exhibit and return LLM-friendly Markdown only. |
+| `get_earnings_release` | Fetch a likely SEC earnings-release exhibit from ticker, fiscal year, and quarter, then return LLM-friendly Markdown only. |
 | `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, context notes and recommended next actions. |
 | `fmp_build_research_pack` | Compatibility alias for the evidence-pack tool. |
 | `fmp_validate_research_evidence` | Return informational notes and recommended next actions from a payload. |
 | `research_report_contract` | Return suggested report structure and sector lenses. |
+
+## `get_earnings_release` inputs
+
+The SEC earnings release tool intentionally exposes only three model-facing parameters:
+
+```json
+{
+  "symbol": "SPT",
+  "fiscalYear": 2026,
+  "fiscalQuarter": 1
+}
+```
+
+The tool infers the SEC filing internally by ranking public SEC filings and candidate exhibits using filing metadata, exhibit metadata, earnings-release language, requested fiscal period signals, and table density. Do not pass `filingDate` in `recommended_next_actions`.
 
 ## Evidence-pack behavior
 

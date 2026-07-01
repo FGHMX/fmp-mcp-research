@@ -17,6 +17,9 @@ def test_release_actions_are_suggestions_only():
     assert actions[0]["tool"] == "get_earnings_release"
     assert set(actions[0]) == {"tool", "arguments", "reason", "suggested_scope", "period_label"}
 
+    assert actions[0]["arguments"] == {"symbol": "ONDS", "fiscalYear": 2026, "fiscalQuarter": 1}
+    assert "filingDate" not in actions[0]["arguments"]
+
 
 def test_statement_actions_are_suggestions_only():
     actions = financial_statement_review_actions("ONDS", [{"year": 2026, "quarter": 1, "period_label": "Q1 2026"}])

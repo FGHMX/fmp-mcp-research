@@ -63,7 +63,7 @@ def test_all_mcp_tools_have_safe_read_only_annotations():
 
 def test_get_earnings_release_uses_fixed_camel_case_inputs_without_html_or_table_flags():
     args = _async_function_args("get_earnings_release")
-    assert args == ["symbol", "fiscalYear", "fiscalQuarter", "filingDate"]
+    assert args == ["symbol", "fiscalYear", "fiscalQuarter"]
     assert "includeHtml" not in args
     assert "includeTables" not in args
 

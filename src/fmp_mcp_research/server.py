@@ -311,18 +311,13 @@ async def get_earnings_release(
     symbol: Symbol,
     fiscalYear: FiscalYear,
     fiscalQuarter: FiscalQuarter,
-    filingDate: ISODateString,
 ) -> str:
     """Fetch an official SEC EDGAR earnings release and convert it to Markdown only."""
     clean_symbol = _clean_symbol(symbol)
-    clean_filing_date = _validate_iso_date(filingDate, field_name="filingDate")
-    if clean_filing_date is None:
-        raise ValueError("filingDate is required")
     return await SECClient().get_earnings_release(
         symbol=clean_symbol,
         fiscal_year=fiscalYear,
         fiscal_quarter=fiscalQuarter,
-        filing_date=clean_filing_date,
     )
 
 

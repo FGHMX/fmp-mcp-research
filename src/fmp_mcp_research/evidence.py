@@ -591,18 +591,17 @@ def earnings_release_review_actions(symbol: str, selected_periods: list[dict[str
     symbol = symbol.upper()
     actions: list[dict[str, Any]] = []
     for period in selected_periods:
-        filing_date = period.get("call_date") or _fallback_period_anchor_date(period["year"], period["quarter"])
         actions.append({
             "tool": "get_earnings_release",
             "arguments": {
                 "symbol": symbol,
                 "fiscalYear": period["year"],
                 "fiscalQuarter": period["quarter"],
-                "filingDate": filing_date,
             },
             "reason": (
                 "Suggested source for the official SEC EDGAR earnings release for this selected quarter. "
-                "The tool returns only LLM-friendly Markdown, including narrative text and Markdown tables for review."
+                "The tool infers the SEC filing from ticker, fiscal year, and quarter, then returns only "
+                "LLM-friendly Markdown with narrative text and compact Markdown tables for review."
             ),
             "suggested_scope": "selected_quarter_official_earnings_release",
             "period_label": period["period_label"],
