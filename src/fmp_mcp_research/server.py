@@ -4,6 +4,7 @@ import os
 import re
 from datetime import date
 from typing import Annotated, Any, Literal
+import asyncio
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -17,6 +18,7 @@ from .evidence import (
     prioritize_sec_filings,
     validate_evidence_payload,
 )
+from .earnings_release import extract_selected_period_for_llm_markdown_public_release
 from .fmp_client import FMPClient
 from .report_contract import build_report_contract
 from .sec_client import SECClient
@@ -312,13 +314,21 @@ async def get_earnings_release(
     fiscalYear: FiscalYear,
     fiscalQuarter: FiscalQuarter,
 ) -> str:
-    """Fetch an official SEC EDGAR earnings release and convert it to Markdown only."""
+    """Fetch an earnings release from public PR sources via FMP and convert it to Markdown only."""
     clean_symbol = _clean_symbol(symbol)
-    return await SECClient().get_earnings_release(
-        symbol=clean_symbol,
+    
+    result = await asyncio.to_thread(
+        extract_selected_period_for_llm_markdown_public_release,
+        ticker=clean_symbol,
         fiscal_year=fiscalYear,
-        fiscal_quarter=fiscalQuarter,
+        quarter=fiscalQuarter,
+        auto_download_zip=False,
     )
+    
+    if result.get("status") == "error":
+        raise RuntimeError(f"Failed to fetch earnings release: {result.get('error')}")
+        
+    return result.get("llm_markdown", "")
 
 
 @mcp.tool(
