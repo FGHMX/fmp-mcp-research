@@ -22,6 +22,35 @@ _EARNINGS_RELEASE_TERMS = re.compile(
     re.I,
 )
 _HTML_EXTENSION_RE = re.compile(r"\.(htm|html|txt)$", re.I)
+_TEXT_CONTENT_TYPES = (
+    "text/html",
+    "text/plain",
+    "application/xhtml+xml",
+    "application/xml",
+    "text/xml",
+)
+_BINARY_EXTENSIONS = (
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".gif",
+    ".webp",
+    ".pdf",
+    ".zip",
+    ".xls",
+    ".xlsx",
+    ".doc",
+    ".docx",
+)
+_BINARY_SIGNATURES = (
+    b"\xff\xd8\xff",  # JPEG
+    b"\x89PNG\r\n\x1a\n",  # PNG
+    b"GIF87a",
+    b"GIF89a",
+    b"%PDF",
+    b"PK\x03\x04",  # ZIP / Office containers
+)
+_DEFAULT_MAX_RELEASE_CHARS = 200_000
 
 _EXHIBIT_99_TERMS = re.compile(
     r"ex[-_ ]?99|exhibit\s*99",
@@ -67,6 +96,49 @@ def _clean_text(value: str) -> str:
     value = re.sub(r" *\n *", "\n", value)
     value = _BLANK_LINE_RE.sub("\n\n", value)
     return value.strip()
+
+
+def _looks_binary(data: bytes) -> bool:
+    if not data:
+        return False
+    if any(data.startswith(signature) for signature in _BINARY_SIGNATURES):
+        return True
+
+    sample = data[:4096]
+    if b"\x00" in sample:
+        return True
+
+    control_chars = sum(1 for byte in sample if byte < 32 and byte not in (9, 10, 13))
+    return control_chars / max(len(sample), 1) > 0.05
+
+
+def _looks_like_binary_garbage(text: str) -> bool:
+    if not text:
+        return False
+
+    sample = text[:10000]
+    printable = sum(ch.isprintable() or ch in "\n\r\t" for ch in sample)
+    printable_ratio = printable / max(len(sample), 1)
+    repeated_noise = sample.count("BBB@") > 20 or sample.count("HHHH") > 20 or sample.count("****") > 100
+    text_markers = ("<html", "<table", "revenue", "net income", "cash flow", "balance sheet")
+    has_text_marker = any(marker in sample.lower() for marker in text_markers)
+
+    return (printable_ratio < 0.85 or repeated_noise) and not has_text_marker
+
+
+def _is_text_content_type(content_type: str) -> bool:
+    lowered = content_type.lower().split(";", 1)[0].strip()
+    return not lowered or lowered in _TEXT_CONTENT_TYPES or lowered.endswith("+xml")
+
+
+def _is_binary_document_name(name: str) -> bool:
+    return name.lower().endswith(_BINARY_EXTENSIONS)
+
+
+def _truncate_release_markdown(markdown: str, max_chars: int) -> tuple[str, bool]:
+    if max_chars <= 0 or len(markdown) <= max_chars:
+        return markdown, False
+    return markdown[:max_chars].rstrip() + "\n", True
 
 
 def _safe_date(value: str | None) -> date | None:
@@ -319,6 +391,7 @@ class SECClient:
             "fmp-mcp-research/0.3.4 contact@example.com",
         )
         self.max_supplemental_files = int(os.getenv("SEC_MAX_SUPPLEMENTAL_SUBMISSION_FILES", "3"))
+        self.max_release_chars = int(os.getenv("SEC_MAX_RELEASE_TEXT_CHARS", str(_DEFAULT_MAX_RELEASE_CHARS)))
 
     @property
     def headers(self) -> dict[str, str]:
@@ -344,8 +417,23 @@ class SECClient:
             raise SECError("SEC returned non-JSON response") from exc
 
     async def _get_text(self, url: str) -> str:
+        if _is_binary_document_name(url):
+            raise SECError(f"Skipping binary SEC file by extension: {url}")
+
         response = await self._get(url)
-        return response.text
+        content_type = response.headers.get("content-type", "")
+        raw = response.content
+
+        if not _is_text_content_type(content_type):
+            raise SECError(f"Skipping non-text SEC file: {content_type} {url}")
+        if _looks_binary(raw):
+            raise SECError(f"Skipping binary SEC file by content: {url}")
+
+        encoding = response.encoding or "utf-8"
+        text = raw.decode(encoding, errors="replace")
+        if _looks_like_binary_garbage(text):
+            raise SECError(f"Skipping SEC file that decoded as binary garbage: {url}")
+        return text
 
     async def cik_for_symbol(self, symbol: str) -> dict[str, Any]:
         symbol_upper = symbol.upper()
@@ -431,6 +519,10 @@ class SECClient:
             warnings.append("earnings_release_terms_not_detected_in_filing_metadata")
         if not markdown.strip():
             warnings.append("selected_document_markdown_is_empty_after_html_conversion")
+
+        markdown, was_truncated = _truncate_release_markdown(markdown, self.max_release_chars)
+        if was_truncated:
+            warnings.append("selected_document_markdown_truncated_server_side")
 
         if warnings:
             warning_lines = "\n".join(f"- {warning}" for warning in warnings)
