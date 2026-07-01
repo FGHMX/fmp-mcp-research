@@ -22,6 +22,23 @@ _EARNINGS_RELEASE_TERMS = re.compile(
     re.I,
 )
 _HTML_EXTENSION_RE = re.compile(r"\.(htm|html|txt)$", re.I)
+
+_SEC_UUENCODE_BLOCK_RE = re.compile(
+    r"(?ims)^begin\s+[0-7]{3}\s+[^\r\n]+\r?\n.*?^end\s*$"
+)
+
+_SEC_GRAPHIC_UUENCODE_BLOCK_RE = re.compile(
+    r"(?ims)"
+    r"(?:^|\n)"
+    r"(?:GRAPHIC\s+\d+\s+[^\r\n]+\s+GRAPHIC\s*)?"
+    r"begin\s+[0-7]{3}\s+[^\r\n]+\r?\n"
+    r".*?"
+    r"^end\s*$"
+)
+
+_SEC_GRAPHIC_HEADER_RE = re.compile(
+    r"(?im)^\s*GRAPHIC\s+\d+\s+[^\r\n]+\s+GRAPHIC\s*$"
+)
 _TEXT_CONTENT_TYPES = (
     "text/html",
     "text/plain",
@@ -141,6 +158,66 @@ def _truncate_release_markdown(markdown: str, max_chars: int) -> tuple[str, bool
     return markdown[:max_chars].rstrip() + "\n", True
 
 
+
+
+def _strip_sec_encoded_binary_blocks(text: str) -> tuple[str, int]:
+    """Remove uuencoded binary attachments embedded in SEC text submissions."""
+    if not text:
+        return text, 0
+
+    cleaned, count_graphic_blocks = _SEC_GRAPHIC_UUENCODE_BLOCK_RE.subn(
+        "\n[SEC encoded binary attachment removed]\n",
+        text,
+    )
+    cleaned, count_plain_blocks = _SEC_UUENCODE_BLOCK_RE.subn(
+        "\n[SEC encoded binary attachment removed]\n",
+        cleaned,
+    )
+    cleaned, count_graphic_headers = _SEC_GRAPHIC_HEADER_RE.subn(
+        "\n[SEC graphic attachment header removed]\n",
+        cleaned,
+    )
+
+    return cleaned, count_graphic_blocks + count_plain_blocks + count_graphic_headers
+
+
+def _looks_like_binary_garbage(text: str) -> bool:
+    if not text:
+        return False
+
+    sample = text[:10000]
+    lower_sample = sample.lower()
+
+    if (
+        "begin 644" in lower_sample
+        or "begin 664" in lower_sample
+        or "begin 666" in lower_sample
+        or "m_]c" in lower_sample
+        or ("graphic" in lower_sample and "jpg" in lower_sample and "begin" in lower_sample)
+    ):
+        return True
+
+    repeated_noise = (
+        sample.count("BBB@") > 20
+        or sample.count("HHHH") > 20
+        or sample.count("****") > 100
+    )
+
+    has_text_marker = any(
+        marker in lower_sample
+        for marker in (
+            "<html",
+            "<table",
+            "revenue",
+            "net income",
+            "cash flow",
+            "balance sheet",
+            "operating income",
+            "earnings",
+        )
+    )
+
+    return repeated_noise and not has_text_marker
 def _safe_date(value: str | None) -> date | None:
     if not value:
         return None
@@ -417,23 +494,14 @@ class SECClient:
             raise SECError("SEC returned non-JSON response") from exc
 
     async def _get_text(self, url: str) -> str:
-        if _is_binary_document_name(url):
-            raise SECError(f"Skipping binary SEC file by extension: {url}")
-
         response = await self._get(url)
-        content_type = response.headers.get("content-type", "")
-        raw = response.content
+        raw_text = response.text
+        cleaned_text, _removed_encoded_blocks = _strip_sec_encoded_binary_blocks(raw_text)
 
-        if not _is_text_content_type(content_type):
-            raise SECError(f"Skipping non-text SEC file: {content_type} {url}")
-        if _looks_binary(raw):
-            raise SECError(f"Skipping binary SEC file by content: {url}")
-
-        encoding = response.encoding or "utf-8"
-        text = raw.decode(encoding, errors="replace")
-        if _looks_like_binary_garbage(text):
+        if _looks_like_binary_garbage(cleaned_text):
             raise SECError(f"Skipping SEC file that decoded as binary garbage: {url}")
-        return text
+
+        return cleaned_text
 
     async def cik_for_symbol(self, symbol: str) -> dict[str, Any]:
         symbol_upper = symbol.upper()
