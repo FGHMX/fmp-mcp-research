@@ -473,6 +473,8 @@ def release_relevance_score(
 
     if detected == requested_period:
         score += 60
+    elif detected and detected != requested_period:
+        score -= 100
 
     title_lower = title.lower()
 
