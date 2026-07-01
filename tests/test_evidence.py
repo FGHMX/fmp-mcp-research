@@ -14,7 +14,7 @@ def test_validate_evidence_payload_is_informational():
 
 def test_release_actions_are_suggestions_only():
     actions = earnings_release_review_actions("ONDS", [{"year": 2026, "quarter": 1, "period_label": "Q1 2026"}])
-    assert actions[0]["tool"] == "get_earnings_release_json"
+    assert actions[0]["tool"] == "get_earnings_release"
     assert set(actions[0]) == {"tool", "arguments", "reason", "suggested_scope", "period_label"}
 
 

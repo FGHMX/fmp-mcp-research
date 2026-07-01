@@ -223,6 +223,92 @@ def html_to_llm_json(raw_html: str, *, include_html: bool = False, include_table
     return payload
 
 
+def _yaml_quote(value: Any) -> str:
+    clean = _clean_text(str(value or "")).replace('\"', '\\\"')
+    return f'"{clean}"'
+
+
+def _markdown_escape_cell(value: Any) -> str:
+    return _clean_text(str(value or "")).replace("|", "\\|")
+
+
+def _markdown_table(rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    max_cols = max((len(row) for row in rows), default=0)
+    if max_cols == 0:
+        return ""
+    normalized = [row + [""] * (max_cols - len(row)) for row in rows]
+    header = normalized[0]
+    body = normalized[1:]
+    # SEC tables often do not have clean header rows. Keep the first row as the header
+    # to preserve source order and avoid inventing labels.
+    lines = ["|" + "|".join(_markdown_escape_cell(cell) for cell in header) + "|"]
+    lines.append("|" + "|".join("---" for _ in range(max_cols)) + "|")
+    for row in body:
+        if any(_clean_text(cell) for cell in row):
+            lines.append("|" + "|".join(_markdown_escape_cell(cell) for cell in row) + "|")
+    return "\n".join(lines)
+
+
+def html_to_llm_markdown(raw_html: str, *, metadata: dict[str, Any]) -> str:
+    parser = _SECReleaseHTMLParser()
+    parser.feed(raw_html)
+    parsed = parser.release_json()
+    blocks = parsed["blocks"]
+    tables = parsed["tables"]
+
+    title = "SEC Earnings Release"
+    for block in blocks[:12]:
+        block_text = _clean_text(str(block.get("text", "")))
+        if block_text and len(block_text) <= 180:
+            title = block_text
+            break
+
+    frontmatter = {
+        "format": "sec_earnings_release_llm_markdown",
+        "symbol": metadata.get("symbol"),
+        "fiscal_year": metadata.get("fiscalYear"),
+        "fiscal_quarter": metadata.get("fiscalQuarter"),
+        "filing_date": metadata.get("filingDate"),
+        "source_name": "SEC EDGAR",
+        "company_title": metadata.get("company_title"),
+        "cik": metadata.get("cik"),
+        "selected_document": metadata.get("selected_document_name"),
+        "selected_document_url": metadata.get("selected_document_url"),
+        "table_count": len(tables),
+    }
+
+    lines: list[str] = ["---"]
+    for key, value in frontmatter.items():
+        if value not in [None, "", [], {}]:
+            lines.append(f"{key}: {_yaml_quote(value)}")
+    lines.extend(["---", "", f"# {title}", ""])
+
+    previous_text = ""
+    for block in blocks:
+        block_text = _clean_text(str(block.get("text", "")))
+        if not block_text or block_text == previous_text:
+            continue
+        previous_text = block_text
+        if block.get("type") == "heading" and block_text != title:
+            lines.extend([f"## {block_text}", ""])
+        elif block.get("type") == "list_item":
+            lines.append(f"- {block_text}")
+        else:
+            lines.extend([block_text, ""])
+
+    for index, rows in enumerate(tables, start=1):
+        table_md = _markdown_table(rows)
+        if table_md:
+            lines.extend([f"## Table {index}", "", table_md, ""])
+
+    markdown = "\n".join(lines)
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown).strip() + "\n"
+    return markdown
+
+
+
 class SECClient:
     def __init__(self) -> None:
         self.data_base_url = os.getenv("SEC_DATA_BASE_URL", "https://data.sec.gov").rstrip("/")
@@ -291,14 +377,14 @@ class SECClient:
         accession = _accession_no_dashes(accession_number)
         return cast(dict[str, Any], await self._get_json(f"{self.sec_base_url}/Archives/edgar/data/{cik_int}/{accession}/index.json"))
 
-    async def get_earnings_release_json(
+    async def get_earnings_release(
         self,
         *,
         symbol: str,
         fiscal_year: int,
         fiscal_quarter: int,
         filing_date: str,
-    ) -> dict[str, Any]:
+    ) -> str:
         mapping = await self.cik_for_symbol(symbol)
         cik = mapping["cik"]
         cik_int = int(mapping["cik_int"])
@@ -324,10 +410,18 @@ class SECClient:
             filing=candidate,
             cik_int=cik_int,
         )
-        release_json = html_to_llm_json(
+        markdown = html_to_llm_markdown(
             raw_html,
-            include_html=False,
-            include_tables=True,
+            metadata={
+                "symbol": symbol.upper(),
+                "fiscalYear": fiscal_year,
+                "fiscalQuarter": fiscal_quarter,
+                "filingDate": filing_date,
+                "company_title": mapping.get("company_title"),
+                "cik": cik,
+                "selected_document_name": document.get("name") or document.get("href"),
+                "selected_document_url": _document_url,
+            },
         )
 
         warnings = []
@@ -335,28 +429,14 @@ class SECClient:
             warnings.append("filing_form_is_not_8k_or_6k")
         if not _EARNINGS_RELEASE_TERMS.search(str(candidate) + " " + str(document)):
             warnings.append("earnings_release_terms_not_detected_in_filing_metadata")
-        if not release_json.get("text"):
-            warnings.append("selected_document_text_is_empty_after_html_conversion")
+        if not markdown.strip():
+            warnings.append("selected_document_markdown_is_empty_after_html_conversion")
 
-        return {
-            "symbol": symbol.upper(),
-            "fiscalYear": fiscal_year,
-            "fiscalQuarter": fiscal_quarter,
-            "filingDate": filing_date,
-            "source_name": "SEC EDGAR",
-            "company": {
-                "cik": cik,
-                "cik_int": cik_int,
-                "title": mapping.get("company_title"),
-            },
-            "selected_document": document,
-            "release_json": release_json,
-            "warnings": warnings,
-            "note": (
-                "This payload is converted from the selected SEC EDGAR filing document into LLM-friendly JSON. "
-                "Review release_json.text and release_json.tables before marking official_release_reviewed=yes."
-            ),
-        }
+        if warnings:
+            warning_lines = "\n".join(f"- {warning}" for warning in warnings)
+            markdown = markdown.rstrip() + "\n\n## Conversion Warnings\n\n" + warning_lines + "\n"
+
+        return markdown
 
     @staticmethod
     def _normalize_filings(recent: dict[str, Any]) -> list[dict[str, Any]]:

@@ -65,7 +65,7 @@ def build_report_contract(sector: str = "healthcare_technology") -> dict[str, ob
                 "fmp_get_earnings_call_q_and_a",
             ],
             "statement_tables_tool": "fmp_get_statement_tables",
-            "sec_earnings_release_tool": "get_earnings_release_json",
+            "sec_earnings_release_tool": "get_earnings_release",
         },
         "note": "The MCP returns information and suggestions only; the analyst or LLM decides how to use them.",
     }

@@ -12,8 +12,7 @@ Read-only MCP server for FMP and SEC research context. The server behaves as an 
 | `fmp_get_earnings_call_q_and_a` | Return Q&A text for a selected period. |
 | `fmp_get_statement_tables` | Return income statement, balance sheet, cash flow, metrics, ratios and growth tables. |
 | `fmp_search_sec_filings` | Return SEC filing candidates from FMP. |
-| `get_earnings_release_json` | Fetch a likely SEC earnings-release exhibit and convert it into JSON text/tables. |
-| `fmp_get_earnings_calendar` | Return earnings calendar data. |
+| `get_earnings_release` | Fetch a likely SEC earnings-release exhibit and return LLM-friendly Markdown only. |
 | `fmp_build_research_evidence_pack` | Build selected periods, evidence manifest, context notes and recommended next actions. |
 | `fmp_build_research_pack` | Compatibility alias for the evidence-pack tool. |
 | `fmp_validate_research_evidence` | Return informational notes and recommended next actions from a payload. |

@@ -48,8 +48,6 @@ class FMPClient:
             "earning-call-transcript", symbol=symbol.upper(), year=year, quarter=quarter
         )
 
-    async def earnings_calendar(self, symbol: str | None = None, from_date: str | None = None, to_date: str | None = None) -> Any:
-        return await self._get("earnings-calendar", symbol=symbol.upper() if symbol else None, **{"from": from_date, "to": to_date})
 
     async def income_statement(self, symbol: str, period: str, limit: int) -> Any:
         return await self._get("income-statement", symbol=symbol.upper(), period=period, limit=min(limit, self.max_limit))

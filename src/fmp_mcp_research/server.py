@@ -303,49 +303,27 @@ async def fmp_search_sec_filings(
 
 
 @mcp.tool(
-    title="Get SEC earnings release JSON",
-    description="Reads one public SEC earnings release and returns text and tables as JSON.",
+    title="Get SEC earnings release",
+    description="Reads one public SEC earnings release and returns LLM-friendly Markdown only.",
     annotations=READ_ONLY_EXTERNAL,
 )
-async def get_earnings_release_json(
+async def get_earnings_release(
     symbol: Symbol,
     fiscalYear: FiscalYear,
     fiscalQuarter: FiscalQuarter,
     filingDate: ISODateString,
-) -> dict[str, Any]:
-    """Fetch an official SEC EDGAR earnings release and convert it to LLM-friendly JSON."""
+) -> str:
+    """Fetch an official SEC EDGAR earnings release and convert it to Markdown only."""
     clean_symbol = _clean_symbol(symbol)
     clean_filing_date = _validate_iso_date(filingDate, field_name="filingDate")
     if clean_filing_date is None:
         raise ValueError("filingDate is required")
-    payload = await SECClient().get_earnings_release_json(
+    return await SECClient().get_earnings_release(
         symbol=clean_symbol,
         fiscal_year=fiscalYear,
         fiscal_quarter=fiscalQuarter,
         filing_date=clean_filing_date,
     )
-    return payload
-
-
-@mcp.tool(
-    title="Get earnings calendar",
-    description="Reads FMP earnings calendar entries.",
-    annotations=READ_ONLY_EXTERNAL,
-)
-async def fmp_get_earnings_calendar(
-    symbol: Symbol | None = None,
-    from_date: ISODateString | None = None,
-    to_date: ISODateString | None = None,
-) -> dict[str, Any]:
-    """Fetch earnings calendar data, including announcement dates and EPS actual/estimate when available."""
-    clean_symbol = _clean_symbol(symbol) if symbol else None
-    clean_from, clean_to = _validate_date_range(from_date, to_date)
-    return {
-        "symbol": clean_symbol,
-        "data": await FMPClient().earnings_calendar(
-            symbol=clean_symbol, from_date=clean_from, to_date=clean_to
-        ),
-    }
 
 
 @mcp.tool(

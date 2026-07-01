@@ -42,6 +42,9 @@ def test_all_mcp_tools_have_safe_read_only_annotations():
     assert tools
     tool_names = {tool.name for tool in tools}
     assert "fmp_get_earnings_call_transcript" not in tool_names
+    assert "fmp_get_earnings_calendar" not in tool_names
+    assert "get_earnings_release_json" not in tool_names
+    assert "get_earnings_release" in tool_names
     assert "fmp_get_earnings_call_prepared_remarks" in tool_names
     assert "fmp_get_earnings_call_q_and_a" in tool_names
     for tool in tools:
@@ -58,8 +61,8 @@ def test_all_mcp_tools_have_safe_read_only_annotations():
             assert annotations["openWorldHint"] is True, tool.name
 
 
-def test_get_earnings_release_json_uses_fixed_camel_case_inputs_without_html_or_table_flags():
-    args = _async_function_args("get_earnings_release_json")
+def test_get_earnings_release_uses_fixed_camel_case_inputs_without_html_or_table_flags():
+    args = _async_function_args("get_earnings_release")
     assert args == ["symbol", "fiscalYear", "fiscalQuarter", "filingDate"]
     assert "includeHtml" not in args
     assert "includeTables" not in args
