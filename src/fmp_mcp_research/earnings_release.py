@@ -365,9 +365,9 @@ def extract_period_from_text(text: str) -> str | None:
     text = text or ""
 
     patterns = [
-        r"fiscal\s+(\d{4})\s+(first|second|third|fourth)\s+quarter",
-        r"(first|second|third|fourth)\s+quarter\s+(?:fiscal\s+)?(\d{4})",
-        r"(first|second|third|fourth)\s+quarter\s+(\d{4})\s+results",
+        r"fiscal\s+(?:year\s+)?(\d{4})\s+(first|second|third|fourth)[-\s]quarter",
+        r"(first|second|third|fourth)[-\s]quarter\s+(?:(?:of|for)\s+)?(?:fiscal\s+(?:year\s+)?)?(\d{4})",
+        r"(first|second|third|fourth)[-\s]quarter\s+(\d{4})\s+results",
         r"\bQ([1-4])\s+FY\s?(\d{4})\b",
         r"\bQ([1-4])\s+fiscal\s+(\d{4})\b",
         r"\bQ([1-4])\s+(\d{4})\b",
@@ -484,6 +484,12 @@ def release_relevance_score(
     if "reports" in title_lower or "announces" in title_lower:
         score += 10
 
+    if any(x in title_lower for x in ["class action", "lawsuit", "investor alert", "shareholder alert", "investigation"]):
+        score -= 100
+        
+    if "dividend" in title_lower:
+        score -= 50
+
     if is_sec_url(url):
         score -= 100
 
@@ -500,7 +506,7 @@ def find_fmp_public_earnings_release(
     fiscal_year: int,
     quarter: Any,
     limit: int = 250,
-    min_score: int = 35,
+    min_score: int = 55,
 ) -> dict[str, Any]:
     ticker = ticker.upper()
     requested_period = expected_period_string(fiscal_year, quarter)
