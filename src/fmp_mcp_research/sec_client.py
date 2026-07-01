@@ -4,7 +4,6 @@ import html
 import os
 import re
 from datetime import date
-from collections import Counter
 from html.parser import HTMLParser
 from typing import Any, cast
 
