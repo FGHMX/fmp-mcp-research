@@ -12,7 +12,8 @@ dependencies = [
   "uvicorn>=0.30.0",
   "pandas",
   "beautifulsoup4",
-  "lxml"
+  "lxml",
+  "requests"
 ]
 
 [project.optional-dependencies]
