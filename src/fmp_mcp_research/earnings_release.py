@@ -49,9 +49,10 @@ import time
 import traceback
 import warnings
 from collections import Counter
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -180,7 +181,7 @@ def yaml_quote(value: Any) -> str:
     return f'"{text}"'
 
 
-def estimate_tokenish_size(text: str) -> Dict[str, int]:
+def estimate_tokenish_size(text: str) -> dict[str, int]:
     text = text or ""
 
     return {
@@ -190,7 +191,7 @@ def estimate_tokenish_size(text: str) -> Dict[str, int]:
     }
 
 
-def split_paragraphs(text: str) -> List[str]:
+def split_paragraphs(text: str) -> list[str]:
     paragraphs = []
     buffer = []
 
@@ -229,7 +230,7 @@ def domain_from_url(url: str) -> str:
 # FMP API HELPERS
 # ============================================================
 
-def fmp_get_json(url: str, params: Dict[str, Any]) -> Any:
+def fmp_get_json(url: str, params: dict[str, Any]) -> Any:
     if not FMP_API_KEY:
         raise ValueError(
             "FMP_API_KEY is not set. Run:\n\n"
@@ -248,8 +249,8 @@ def fmp_get_json(url: str, params: Dict[str, Any]) -> Any:
 
     try:
         data = response.json()
-    except Exception:
-        raise RuntimeError(f"FMP response was not JSON: {response.text[:1000]}")
+    except Exception as err:
+        raise RuntimeError(f"FMP response was not JSON: {response.text[:1000]}") from err
 
     if isinstance(data, dict) and data.get("Error Message"):
         raise RuntimeError(f"FMP error: {data}")
@@ -260,7 +261,7 @@ def fmp_get_json(url: str, params: Dict[str, Any]) -> Any:
 def fmp_search_press_releases(
     ticker: str,
     limit: int = 250,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     FMP endpoint:
     https://financialmodelingprep.com/stable/news/press-releases?symbols=AAPL
@@ -298,7 +299,7 @@ def fmp_search_press_releases(
 # PRESS RELEASE FIELD EXTRACTION
 # ============================================================
 
-def extract_release_date(item: Dict[str, Any]):
+def extract_release_date(item: dict[str, Any]):
     for key in [
         "publishedDate",
         "date",
@@ -315,7 +316,7 @@ def extract_release_date(item: Dict[str, Any]):
     return None
 
 
-def extract_release_title(item: Dict[str, Any]) -> str:
+def extract_release_title(item: dict[str, Any]) -> str:
     return clean_text(
         first_non_empty(
             item.get("title"),
@@ -326,7 +327,7 @@ def extract_release_title(item: Dict[str, Any]) -> str:
     )
 
 
-def extract_release_url(item: Dict[str, Any]) -> Optional[str]:
+def extract_release_url(item: dict[str, Any]) -> str | None:
     return first_non_empty(
         item.get("url"),
         item.get("link"),
@@ -336,7 +337,7 @@ def extract_release_url(item: Dict[str, Any]) -> Optional[str]:
     )
 
 
-def extract_fmp_release_text(item: Dict[str, Any]) -> str:
+def extract_fmp_release_text(item: dict[str, Any]) -> str:
     body = first_non_empty(
         item.get("text"),
         item.get("content"),
@@ -348,7 +349,7 @@ def extract_fmp_release_text(item: Dict[str, Any]) -> str:
     return clean_text(body)
 
 
-def extract_publisher(item: Dict[str, Any]) -> Optional[str]:
+def extract_publisher(item: dict[str, Any]) -> str | None:
     return first_non_empty(
         item.get("publisher"),
         item.get("site"),
@@ -360,7 +361,7 @@ def extract_publisher(item: Dict[str, Any]) -> Optional[str]:
 # PERIOD MATCHING
 # ============================================================
 
-def extract_period_from_text(text: str) -> Optional[str]:
+def extract_period_from_text(text: str) -> str | None:
     text = text or ""
 
     patterns = [
@@ -429,7 +430,7 @@ def likely_earnings_release_text(text: str) -> bool:
 
 
 def release_relevance_score(
-    item: Dict[str, Any],
+    item: dict[str, Any],
     ticker: str,
     fiscal_year: int,
     quarter: Any,
@@ -498,7 +499,7 @@ def find_fmp_public_earnings_release(
     quarter: Any,
     limit: int = 250,
     min_score: int = 35,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ticker = ticker.upper()
     requested_period = expected_period_string(fiscal_year, quarter)
 
@@ -779,7 +780,7 @@ def normalize_table_df(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def remove_consecutive_duplicates(cells: Sequence[str]) -> List[str]:
+def remove_consecutive_duplicates(cells: Sequence[str]) -> list[str]:
     out = []
 
     for cell in cells:
@@ -796,7 +797,7 @@ def remove_consecutive_duplicates(cells: Sequence[str]) -> List[str]:
     return out
 
 
-def merge_currency_cells(cells: Sequence[str]) -> List[str]:
+def merge_currency_cells(cells: Sequence[str]) -> list[str]:
     merged = []
     i = 0
 
@@ -817,7 +818,7 @@ def merge_currency_cells(cells: Sequence[str]) -> List[str]:
     return [c for c in merged if c]
 
 
-def compact_row_values(row: Sequence[Any]) -> List[str]:
+def compact_row_values(row: Sequence[Any]) -> list[str]:
     cells = [cell_to_text(x) for x in row]
     cells = [c for c in cells if c]
     cells = remove_consecutive_duplicates(cells)
@@ -830,7 +831,7 @@ def markdown_escape_cell(text: Any) -> str:
     return cell_to_text(text).replace("|", "\\|")
 
 
-def markdown_table(headers: List[str], rows: List[List[str]]) -> str:
+def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
     if not rows:
         return ""
 
@@ -960,7 +961,7 @@ def is_section_label(cells: Sequence[str]) -> bool:
     }
 
 
-def detect_year_headers(rows: List[List[str]]) -> Optional[List[str]]:
+def detect_year_headers(rows: list[list[str]]) -> list[str] | None:
     early = rows[:8]
 
     for row in early:
@@ -982,7 +983,7 @@ def detect_year_headers(rows: List[List[str]]) -> Optional[List[str]]:
     return None
 
 
-def row_to_semantic(row: List[str], headers: Optional[List[str]]) -> Optional[List[str]]:
+def row_to_semantic(row: list[str], headers: list[str] | None) -> list[str] | None:
     if not row:
         return None
 
@@ -1045,7 +1046,7 @@ def compact_table_markdown(df: pd.DataFrame, category: str = "other") -> str:
     return markdown_table(generic_headers, compact_rows)
 
 
-def table_payload_from_tag(table_tag, table_index: int) -> Optional[Dict[str, Any]]:
+def table_payload_from_tag(table_tag, table_index: int) -> dict[str, Any] | None:
     try:
         dfs = pd.read_html(str(table_tag), keep_default_na=False)
     except Exception:
@@ -1095,7 +1096,7 @@ def line_looks_table_like(line: str) -> bool:
     return has_numbers and (has_spacing or has_financial_word)
 
 
-def extract_text_table_blocks(text: str) -> List[Dict[str, Any]]:
+def extract_text_table_blocks(text: str) -> list[dict[str, Any]]:
     lines = str(text or "").splitlines()
     sections = []
     text_buffer = []
@@ -1189,7 +1190,7 @@ def clean_structured_text_chunk(text: str) -> str:
     return clean_text("\n".join(cleaned))
 
 
-def extract_ordered_release_sections_from_html(html: str, url: str) -> List[Dict[str, Any]]:
+def extract_ordered_release_sections_from_html(html: str, url: str) -> list[dict[str, Any]]:
     container = select_main_press_release_container(html, url)
     soup = remove_unwanted_html(container)
 
@@ -1273,7 +1274,7 @@ def extract_ordered_release_sections_from_html(html: str, url: str) -> List[Dict
     return deduped
 
 
-def extract_ordered_release_sections_from_text(text: str) -> List[Dict[str, Any]]:
+def extract_ordered_release_sections_from_text(text: str) -> list[dict[str, Any]]:
     sections = extract_text_table_blocks(text)
 
     if sections:
@@ -1289,11 +1290,11 @@ def extract_ordered_release_sections_from_text(text: str) -> List[Dict[str, Any]
     }]
 
 
-def get_narrative_text_from_sections(sections: List[Dict[str, Any]]) -> str:
+def get_narrative_text_from_sections(sections: list[dict[str, Any]]) -> str:
     return clean_text("\n\n".join(block.get("text", "") for block in sections if block.get("type") == "text"))
 
 
-def extract_headline(text: str) -> Optional[str]:
+def extract_headline(text: str) -> str | None:
     lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
 
     for line in lines[:80]:
@@ -1312,7 +1313,7 @@ def extract_headline(text: str) -> Optional[str]:
     return normalize_space(lines[0]) if lines else None
 
 
-def table_counts_from_sections(sections: List[Dict[str, Any]]) -> Dict[str, int]:
+def table_counts_from_sections(sections: list[dict[str, Any]]) -> dict[str, int]:
     html_counts = Counter(block.get("category", "other") for block in sections if block.get("type") == "table")
     text_table_count = sum(1 for block in sections if block.get("type") == "table_text")
 
@@ -1326,7 +1327,7 @@ def table_counts_from_sections(sections: List[Dict[str, Any]]) -> Dict[str, int]
     }
 
 
-def heading_for_table(block: Dict[str, Any], table_number: int) -> str:
+def heading_for_table(block: dict[str, Any], table_number: int) -> str:
     category = block.get("category") or "other"
 
     label = {
@@ -1350,9 +1351,9 @@ def heading_for_table(block: Dict[str, Any], table_number: int) -> str:
 
 def build_llm_markdown_release(
     release_id: str,
-    metadata: Dict[str, Any],
-    ordered_sections: List[Dict[str, Any]],
-    table_counts: Dict[str, int],
+    metadata: dict[str, Any],
+    ordered_sections: list[dict[str, Any]],
+    table_counts: dict[str, int],
 ) -> str:
     headline = metadata.get("headline") or metadata.get("title") or "Earnings Release"
 
@@ -1442,13 +1443,13 @@ def build_llm_markdown_release(
 
 def build_manifest(
     release_id: str,
-    metadata: Dict[str, Any],
-    table_counts: Dict[str, int],
+    metadata: dict[str, Any],
+    table_counts: dict[str, int],
     llm_markdown_path: str,
     raw_html_path: str,
     raw_fmp_path: str,
     llm_markdown: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     return {
         "id": release_id,
         "ticker": metadata.get("ticker"),
@@ -1468,7 +1469,7 @@ def build_manifest(
         "size_estimates": {
             "llm_markdown": estimate_tokenish_size(llm_markdown),
         },
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": datetime.now(UTC).isoformat(),
     }
 
 
@@ -1478,11 +1479,11 @@ def build_manifest(
 
 def process_public_press_release_to_llm_markdown(
     ticker: str,
-    release: Dict[str, Any],
+    release: dict[str, Any],
     fiscal_year: int,
     quarter: Any,
     prefer_scraped_html: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ticker = ticker.upper()
 
     title = extract_release_title(release)
@@ -1633,7 +1634,7 @@ def write_error_outputs(
     fiscal_year: int,
     quarter: Any,
     error: Exception,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     error_manifest = {
         "status": "error",
         "ticker": ticker,
@@ -1643,7 +1644,7 @@ def write_error_outputs(
         "traceback": traceback.format_exc(),
         "output_dir": str(OUTPUT_DIR),
         "debug_dir": str(DEBUG_DIR),
-        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "created_at_utc": datetime.now(UTC).isoformat(),
     }
 
     error_manifest_path = MANIFEST_DIR / f"{ticker.lower()}_error_manifest.json"
@@ -1671,7 +1672,7 @@ def extract_selected_period_for_llm_markdown_public_release(
     prefer_scraped_html: bool = True,
     auto_download_zip: bool = True,
     print_full_markdown: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     ticker = ticker.upper()
     requested_period = expected_period_string(fiscal_year, quarter)
 
@@ -1750,7 +1751,7 @@ def extract_selected_period_for_llm_markdown_public_release(
         return result
 
 
-def debug_result_files(result: Dict[str, Any]) -> None:
+def debug_result_files(result: dict[str, Any]) -> None:
     print("")
     print("Debug result files")
     print("------------------")
@@ -1788,43 +1789,3 @@ def debug_result_files(result: Dict[str, Any]) -> None:
         print("  contains <table>:", "<table" in raw.lower())
         print("  first 1000 chars:")
         print(raw[:1000])
-
-
-
-import os
-import io
-import contextlib
-
-os.environ["FMP_API_KEY"] = "NXm8LKr3hjBVZLtEezHOL7etMZdbw3g5"
-FMP_API_KEY = os.getenv("FMP_API_KEY", "").strip()
-
-silent_output = io.StringIO()
-
-with contextlib.redirect_stdout(silent_output):
-    result = extract_selected_period_for_llm_markdown_public_release(
-        ticker="NUTX",
-        fiscal_year=2026,
-        quarter="Q1",
-        limit=250,
-        prefer_scraped_html=True,
-        auto_download_zip=False,
-        print_full_markdown=False,
-    )
-
-if result.get("status") == "error":
-    print(result.get("error"))
-else:
-    md = result["llm_markdown"]
-
-    # Quitar front matter YAML si existe
-    if md.startswith("---"):
-        parts = md.split("---", 2)
-        if len(parts) == 3:
-            md = parts[2].strip()
-
-    # Quitar el título principal "# ..."
-    lines = md.splitlines()
-    if lines and lines[0].startswith("# "):
-        lines = lines[1:]
-
-    print("\n".join(lines).strip())

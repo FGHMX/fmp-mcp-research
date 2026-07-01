@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import date
 from typing import Annotated, Any, Literal
-import asyncio
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from .earnings_release import extract_selected_period_for_llm_markdown_public_release
 from .evidence import (
     build_evidence_pack,
     build_transcript_payload,
@@ -18,10 +19,8 @@ from .evidence import (
     prioritize_sec_filings,
     validate_evidence_payload,
 )
-from .earnings_release import extract_selected_period_for_llm_markdown_public_release
 from .fmp_client import FMPClient
 from .report_contract import build_report_contract
-from .sec_client import SECClient
 
 load_dotenv()
 
